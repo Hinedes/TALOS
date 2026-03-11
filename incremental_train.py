@@ -443,7 +443,7 @@ def main():
     val_sid, val_entry = val_seqs[0]
     val_seq_path = download_sequence(val_sid, val_entry, root)
     val_df, val_gravity = load_continuous_val_stream(val_seq_path)
-    val_data = load_sequence(val_seq_path)
+    val_data = load_sequence(val_seq_path, augment=False)
     print(f"  Val Sequence loaded. Duration: {len(val_df)*ESKF_DT:.1f}s")
 
     model      = SpectralMLP(INPUT_DIM).to(device)

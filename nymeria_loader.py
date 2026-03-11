@@ -77,7 +77,15 @@ def interpolate_gt(gt_ts, gt_pos, gt_quat, imu_ts):
     imu_clamped = np.clip(imu_ts, gt_ts[0], gt_ts[-1])
     return pos_interp(imu_clamped).astype(np.float32), slerp(imu_clamped).as_quat().astype(np.float32)
 
-def make_windows(imu1, pos, quat, window, stride,):
+def _random_yaw_rotation():
+    """Generate a random rotation matrix around the gravity (Z) axis."""
+    angle = np.random.uniform(0, 2 * np.pi)
+    c, s = np.cos(angle), np.sin(angle)
+    return np.array([[c, -s, 0],
+                     [s,  c, 0],
+                     [0,  0, 1]], dtype=np.float32)
+
+def make_windows(imu1, pos, quat, window, stride, augment=True):
     N = len(imu1)
     starts = range(0, N - window, stride)
 
@@ -102,7 +110,33 @@ def make_windows(imu1, pos, quat, window, stride,):
 
         imu_window = imu1[s:e].copy()
 
-        # Zero out the gravity/DC component
+        # --- Data Augmentation (training only) ---
+        if augment:
+            # A. Random yaw rotation — heading equivariance
+            #    Rotate accel, gyro, and labels identically around gravity axis
+            R_yaw = _random_yaw_rotation()
+            imu_window[:, :3] = (R_yaw @ imu_window[:, :3].T).T   # accel
+            imu_window[:, 3:] = (R_yaw @ imu_window[:, 3:].T).T   # gyro
+            delta_p_local     = R_yaw @ delta_p_local              # translation label
+
+            R_yaw_rot    = Rotation.from_matrix(R_yaw)
+            q_orig       = Rotation.from_quat([q_delta_wxyz[1], q_delta_wxyz[2],
+                                                q_delta_wxyz[3], q_delta_wxyz[0]])  # WXYZ→XYZW
+            q_rot        = R_yaw_rot * q_orig
+            q_rot_xyzw   = q_rot.as_quat()
+            q_delta_wxyz = np.array([q_rot_xyzw[3], q_rot_xyzw[0],
+                                     q_rot_xyzw[1], q_rot_xyzw[2]], dtype=np.float32)
+
+            # B. Noise injection — domain gap bridging
+            #    Gaussian noise + per-window constant bias to simulate different IMU sensors
+            accel_noise = np.random.normal(0, 0.01, imu_window[:, :3].shape).astype(np.float32)
+            gyro_noise  = np.random.normal(0, 0.001, imu_window[:, 3:].shape).astype(np.float32)
+            accel_bias  = np.random.normal(0, 0.05, (1, 3)).astype(np.float32)
+            gyro_bias   = np.random.normal(0, 0.005, (1, 3)).astype(np.float32)
+            imu_window[:, :3] += accel_noise + accel_bias
+            imu_window[:, 3:] += gyro_noise  + gyro_bias
+
+        # Zero out the gravity/DC component (after augmentation so bias doesn't leak into DC)
         imu_window[:, :3] = imu_window[:, :3] - np.mean(imu_window[:, :3], axis=0)
 
         imu1_windows.append(imu_window.astype(np.float32))
@@ -115,7 +149,7 @@ def make_windows(imu1, pos, quat, window, stride,):
         'quat':          np.stack(quat_labels).astype(np.float32),
     }
 
-def load_sequence(sequence_root: str | Path, window: int = WINDOW_SIZE, stride: int = STRIDE, target_hz: float = TARGET_HZ) -> dict:
+def load_sequence(sequence_root: str | Path, window: int = WINDOW_SIZE, stride: int = STRIDE, target_hz: float = TARGET_HZ, augment: bool = True) -> dict:
     root = Path(sequence_root)
     vrs_path  = root / 'data' / 'motion.vrs'
     traj_path = root / 'mps' / 'slam' / 'closed_loop_trajectory.csv'
@@ -153,8 +187,8 @@ def load_sequence(sequence_root: str | Path, window: int = WINDOW_SIZE, stride: 
     quat_at_imu = quat_at_imu[mask]
     print(f"[nymeria_loader] Trimmed to GT coverage : {len(grid_ns)} samples remaining")
 
-    print(f"[nymeria_loader] Windowing (size={window}, stride={stride})...")
-    result = make_windows(imu1_reg, pos_at_imu, quat_at_imu, window, stride)
+    print(f"[nymeria_loader] Windowing (size={window}, stride={stride}, augment={augment})...")
+    result = make_windows(imu1_reg, pos_at_imu, quat_at_imu, window, stride, augment=augment)
 
     duration_s = (grid_ns[-1] - grid_ns[0]) / 1e9
     print(f"[nymeria_loader] Done : {len(result['trans'])} windows from {duration_s:.1f}s")
