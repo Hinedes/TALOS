@@ -323,7 +323,7 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
             v_world = eskf_talos.orientation @ (pred_delta_np / window_time)
             
             # Phase 3: The Dynamic Bouncer via Aleatoric Uncertainty
-            R_obs_dynamic = np.diag(np.exp(pred_cov_np))
+            R_obs_dynamic = np.diag(np.clip(np.exp(pred_cov_np), 1e-3, None))
             eskf_talos.update_velocity(v_world, R_obs=R_obs_dynamic)
 
         # ZARU (TALOS only)
