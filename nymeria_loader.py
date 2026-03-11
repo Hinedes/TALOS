@@ -101,19 +101,7 @@ def make_windows(imu1, pos, quat, window, stride, noise_std_deg=NOISE_STD_DEG):
         # 3. Enforce [W, X, Y, Z] format
         q_delta_wxyz = np.array([q_delta_xyzw[3], q_delta_xyzw[0], q_delta_xyzw[1], q_delta_xyzw[2]], dtype=np.float32)
 
-        # 4. Phase 1: Gravity Alignment with Domain Gap Noise Injection
-        # Sample a single random rotational offset for the entire window
-        euler_noise = np.random.normal(0, noise_std_rad, 3)
-        R_noise = Rotation.from_euler('xyz', euler_noise)
-
-        # Retrieve GT orientation for the window and apply the simulated drift
-        R_gt_window = Rotation.from_quat(quat[s:e])
-        R_noisy_window = R_noise * R_gt_window
-
-        # Rotate the IMU buffer into the perturbed gravity-aligned frame
         imu_window = imu1[s:e].copy()
-        imu_window[:, :3] = R_noisy_window.apply(imu_window[:, :3]) # Accel
-        imu_window[:, 3:] = R_noisy_window.apply(imu_window[:, 3:]) # Gyro
 
         imu1_windows.append(imu_window.astype(np.float32))
         trans_labels.append(delta_p_local.astype(np.float32))
