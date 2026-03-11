@@ -13,6 +13,7 @@ IDOL/
 llama/
 nymeria/
 Legacy/
+archive/
 golden_train.npy
 golden_val.npy
 *.pth

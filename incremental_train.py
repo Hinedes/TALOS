@@ -354,11 +354,16 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
     pure_positions  = np.array(pure_positions)
     talos_err       = np.linalg.norm(talos_positions - gt_pos, axis=1)
     mean_ate        = talos_err.mean()
+    final_ate       = talos_err[-1]
+    total_distance  = np.sum(np.linalg.norm(np.diff(gt_pos, axis=0), axis=1))
+    mean_rte        = (mean_ate / total_distance) * 100
+    final_rte       = (final_ate / total_distance) * 100
 
     fig = plt.figure(figsize=(16, 6))
     fig.suptitle(
-        f"Round {round_idx} | TALOS ATE: {mean_ate:.3f}m "
-        f"vs Pure IMU ATE: {np.linalg.norm(pure_positions - gt_pos, axis=1).mean():.3f}m",
+        f"Round {round_idx} | TALOS ATE: {mean_ate:.3f}m (RTE {mean_rte:.2f}%) "
+        f"| Final Drift: {final_ate:.3f}m ({final_rte:.2f}%) "
+        f"| Pure IMU: {np.linalg.norm(pure_positions - gt_pos, axis=1).mean():.3f}m",
         fontweight='bold'
     )
 
