@@ -491,7 +491,15 @@ def main():
     print(f"\n:: Pre-loading ESKF Validation Baseline ({VAL_SUBJECT}) ::")
     val_sid, val_entry = val_seqs[0]
     val_seq_path = download_sequence(val_sid, val_entry, root)
-    val_df, val_gravity = load_continuous_val_stream(val_seq_path)
+    import pickle
+    _val_cache = Path("/mnt/c/TALOS/golden/cache") / f"{val_seq_path.parent.name}_val_stream.pkl"
+    if _val_cache.exists():
+        print(f"  [cache] HIT val_stream")
+        val_df, val_gravity = pickle.load(open(_val_cache, "rb"))
+    else:
+        val_df, val_gravity = load_continuous_val_stream(val_seq_path)
+        pickle.dump((val_df, val_gravity), open(_val_cache, "wb"))
+        print(f"  [cache] val_stream saved.")
     val_data = load_sequence_cached(val_seq_path, augment=False)
     print(f"  Val Sequence loaded. Duration: {len(val_df)*ESKF_DT:.1f}s")
 
