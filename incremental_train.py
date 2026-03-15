@@ -29,6 +29,7 @@ import matplotlib
 matplotlib.use('Agg')  # Strict headless operation
 import matplotlib.pyplot as plt
 from scipy.spatial.transform import Rotation
+from datetime import datetime
 from torch.utils.data import DataLoader, TensorDataset
 from projectaria_tools.core import data_provider
 
@@ -464,6 +465,9 @@ def main():
     root, golden = Path(args.root), Path(args.golden)
     root.mkdir(parents=True, exist_ok=True)
     golden.mkdir(parents=True, exist_ok=True)
+    run_dir = golden / datetime.now().strftime("run_%Y%m%d_%H%M%S")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    print(f":: Run directory: {run_dir.name}")
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     with open(args.manifest) as f:
@@ -540,17 +544,17 @@ def main():
         if train_final > WARMUP_LOSS_THRESHOLD:
             print(f"  [ESKF]  Skipped : warming up (loss={train_final:.4f} > {WARMUP_LOSS_THRESHOLD})")
             history.append({'round': round_idx, 'ate': None, 'train_loss': train_final})
-            update_master_dashboard(history, golden / 'master_telemetry.png')
+            update_master_dashboard(history, run_dir / 'master_telemetry.png')
             continue
 
         print("  [ESKF]  Integrating validation sequence...")
         # Skip stationary period (first 313s), evaluate on real walking only
         val_df_walk = val_df.iloc[313*100:].reset_index(drop=True)
-        mean_ate = evaluate_eskf(model, val_df_walk, val_gravity, device, round_idx, golden, max_seconds=300)
+        mean_ate = evaluate_eskf(model, val_df_walk, val_gravity, device, round_idx, run_dir, max_seconds=300)
         print(f"  [Result] Neural Loss: {train_final:.4f} | ESKF ATE: {mean_ate:.3f}m")
 
         history.append({'round': round_idx, 'ate': mean_ate, 'train_loss': train_final})
-        update_master_dashboard(history, golden / 'master_telemetry.png')
+        update_master_dashboard(history, run_dir / 'master_telemetry.png')
 
         if mean_ate < best_ate_ever:
             best_ate_ever = mean_ate
@@ -574,7 +578,8 @@ def main():
     subprocess.run(["python3", "notion_logger.py",
         "--ate",   str(round(best_ate_ever, 3)),
         "--round", str(best_ate_round),
-        "--total", str(round_idx)],
+        "--total", str(round_idx),
+        "--run", run_dir.name],
         cwd="/mnt/c/TALOS")
 
 if __name__ == '__main__':
