@@ -36,7 +36,7 @@ from SMLP import BigSpectralMLP as SpectralMLP
 from laid import LAIDBouncer
 from halo import HALOObserver
 from npp import NPPTracker
-from nymeria_loader import (load_sequence, load_imu_stream, align_imu_streams,
+from nymeria_loader import (load_sequence, load_sequence_cached, load_imu_stream, align_imu_streams,
                             load_gt_trajectory, interpolate_gt,
                             SID_RIGHT, SID_LEFT, TARGET_HZ)
 
@@ -488,7 +488,7 @@ def main():
     val_sid, val_entry = val_seqs[0]
     val_seq_path = download_sequence(val_sid, val_entry, root)
     val_df, val_gravity = load_continuous_val_stream(val_seq_path)
-    val_data = load_sequence(val_seq_path, augment=False)
+    val_data = load_sequence_cached(val_seq_path, augment=False)
     print(f"  Val Sequence loaded. Duration: {len(val_df)*ESKF_DT:.1f}s")
 
     model      = SpectralMLP().to(device)
@@ -499,6 +499,7 @@ def main():
 
     bad_rounds    = 0
     best_ate_ever = float('inf')
+    best_ate_round = -1
 
     best_loss_ever       = float('inf')
     loss_stagnant_rounds = 0
@@ -515,7 +516,7 @@ def main():
         if not seq_path: continue
 
         try:
-            new_data   = load_sequence(seq_path)
+            new_data   = load_sequence_cached(seq_path)
             train_data = accumulate(train_data, new_data)
         except Exception as e:
             print(f"  !! Load failed: {e}")
@@ -553,6 +554,7 @@ def main():
 
         if mean_ate < best_ate_ever:
             best_ate_ever = mean_ate
+            best_ate_round = round_idx
             bad_rounds    = 0
             shutil.copy(golden / 'talos.pth', golden / 'talos_best_physical.pth')
             print(f"  [Best]  New best ATE: {mean_ate:.3f}m : checkpoint saved.")
@@ -563,6 +565,11 @@ def main():
         if bad_rounds >= PATIENCE:
             print(f"\n!! PHYSICAL OVERFITTING DETECTED. ESKF drift worsened for {PATIENCE} rounds. Halting.")
             break
+
+    print(f"\n:: Training Complete ::")
+    print(f"   Best ATE : {best_ate_ever:.3f}m")
+    print(f"   Achieved : Round {best_ate_round}")
+    print(f"   Checkpoint : golden/talos_best_physical.pth")
 
 if __name__ == '__main__':
     main()
