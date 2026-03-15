@@ -570,6 +570,12 @@ def main():
     print(f"   Best ATE : {best_ate_ever:.3f}m")
     print(f"   Achieved : Round {best_ate_round}")
     print(f"   Checkpoint : golden/talos_best_physical.pth")
+    import subprocess
+    subprocess.run(["python3", "notion_logger.py",
+        "--ate",   str(round(best_ate_ever, 3)),
+        "--round", str(best_ate_round),
+        "--total", str(round_idx)],
+        cwd="/mnt/c/TALOS")
 
 if __name__ == '__main__':
     main()
