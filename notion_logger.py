@@ -19,6 +19,12 @@ def _load_token():
                 return line.split('=', 1)[1].strip()
     return os.environ.get('NOTION_TOKEN')
 
+def _t(text, bold=False):
+    obj = {"type": "text", "text": {"content": text}}
+    if bold:
+        obj["annotations"] = {"bold": True}
+    return obj
+
 def log_run(best_ate: float, best_round: int, total_rounds: int):
     token = _load_token()
     if not token:
@@ -30,22 +36,49 @@ def log_run(best_ate: float, best_round: int, total_rounds: int):
         "Notion-Version": "2022-06-28",
         "Content-Type": "application/json",
     }
+
     body = {
         "children": [
             {
                 "object": "block",
                 "type": "heading_2",
-                "heading_2": {"rich_text": [{"text": {"content":
-                    f"{date.today()} — Training Run: {best_ate:.3f}m ATE @ Round {best_round}"
-                }}]}
+                "heading_2": {"rich_text": [
+                    _t(f"{date.today()} \u2014 Training Run")
+                ]}
             },
             {
                 "object": "block",
-                "type": "paragraph",
-                "paragraph": {"rich_text": [{"text": {"content":
-                    f"Best ATE: {best_ate:.3f}m | Achieved: Round {best_round}/{total_rounds} | "
-                    f"Val: shelby_arroyo (300s walking) | Checkpoint: golden/talos_best_physical.pth"
-                }}]}
+                "type": "callout",
+                "callout": {
+                    "rich_text": [
+                        _t("Best ATE: ", bold=True),
+                        _t(f"{best_ate:.3f}m", bold=True),
+                        _t(f"  \u2014  achieved at Round {best_round} of {total_rounds}"),
+                    ],
+                    "icon": {"type": "emoji", "emoji": "🎯"},
+                    "color": "blue_background"
+                }
+            },
+            {
+                "object": "block",
+                "type": "bulleted_list_item",
+                "bulleted_list_item": {"rich_text": [
+                    _t("Val sequence: ", bold=True), _t("shelby_arroyo (300s walking window)")
+                ]}
+            },
+            {
+                "object": "block",
+                "type": "bulleted_list_item",
+                "bulleted_list_item": {"rich_text": [
+                    _t("Checkpoint: ", bold=True), _t("golden/talos_best_physical.pth")
+                ]}
+            },
+            {
+                "object": "block",
+                "type": "bulleted_list_item",
+                "bulleted_list_item": {"rich_text": [
+                    _t("Training rounds completed: ", bold=True), _t(str(total_rounds))
+                ]}
             },
             {
                 "object": "block",
@@ -54,6 +87,7 @@ def log_run(best_ate: float, best_round: int, total_rounds: int):
             }
         ]
     }
+
     r = requests.patch(
         f"https://api.notion.com/v1/blocks/{RESEARCH_LOG_ID}/children",
         headers=headers, json=body, timeout=10
