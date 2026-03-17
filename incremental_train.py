@@ -40,7 +40,7 @@ from npp import NPPTracker
 from nymeria_loader import (load_sequence, load_sequence_cached, load_imu_stream, align_imu_streams,
                             load_gt_trajectory, interpolate_gt,
                             SID_RIGHT, SID_LEFT, TARGET_HZ)
-from telemetry import generate_diagnostic_dashboard
+from telemetry import append_eval_csv, generate_diagnostic_dashboard
 
 # Configuration
 PATIENCE               = 15      # ESKF ATE strikes before halting (physical overfitting)
@@ -416,6 +416,9 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
     slap_count = 0
     neural_updates = 0
     cage_clamp_count = 0
+    laid_veto_count = 0
+    zaru_fire_count = 0
+    cau_fire_count = 0
 
     # --- Diagnostic Lens Buffers ---
     # Lens 1: Scale Collapse
@@ -430,10 +433,14 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
     diag_pred_std     = []
     diag_abs_error    = []
     diag_yaw_err_deg  = []
+    diag_update_rows  = []
+    diag_step_rows    = []
 
     for step in range(len(df)):
         a, g = accel[step], gyro[step]
         a2_sample = accel2[step]
+        zaru_fired = False
+        cau_fired = False
 
         # LAID fast loop gate (TALOS only): veto physically impossible samples
         eskf_talos.predict(a, g)  # fast loop ungated -- check_sample fires on footstrikes
@@ -533,6 +540,49 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                 diag_pred_std.append(current_std)
                 diag_abs_error.append(current_err)
 
+                diag_update_rows.append({
+                    'step_idx': step,
+                    'laid_veto': False,
+                    'laid_residual_rms': float(laid_rms),
+                    'slap_accepted': bool(accepted),
+                    'mahal_sq': float(mahal_sq),
+                    'gt_speed_mps': float(np.linalg.norm(gt_v_local)),
+                    'pred_vx': float(pred_v_local[0]),
+                    'pred_vy': float(pred_v_local[1]),
+                    'pred_vz': float(pred_v_local[2]),
+                    'gt_vx': float(gt_v_local[0]),
+                    'gt_vy': float(gt_v_local[1]),
+                    'gt_vz': float(gt_v_local[2]),
+                    'pred_std_x': float(current_std[0]),
+                    'pred_std_y': float(current_std[1]),
+                    'pred_std_z': float(current_std[2]),
+                    'abs_err_x': float(current_err[0]),
+                    'abs_err_y': float(current_err[1]),
+                    'abs_err_z': float(current_err[2]),
+                })
+            else:
+                laid_veto_count += 1
+                diag_update_rows.append({
+                    'step_idx': step,
+                    'laid_veto': True,
+                    'laid_residual_rms': float(laid_rms),
+                    'slap_accepted': None,
+                    'mahal_sq': None,
+                    'gt_speed_mps': None,
+                    'pred_vx': float(pred_vel_local[0]),
+                    'pred_vy': float(pred_vel_local[1]),
+                    'pred_vz': float(pred_vel_local[2]),
+                    'gt_vx': None,
+                    'gt_vy': None,
+                    'gt_vz': None,
+                    'pred_std_x': float(np.exp(pred_cov_np[0] / 2.0)),
+                    'pred_std_y': float(np.exp(pred_cov_np[1] / 2.0)),
+                    'pred_std_z': float(np.exp(pred_cov_np[2] / 2.0)),
+                    'abs_err_x': None,
+                    'abs_err_y': None,
+                    'abs_err_z': None,
+                })
+
             # KILL THIS: LAID is mathematically flawed in rotating frames
             # omega_yaw, yaw_trust, omega_mag = laid_bouncer.yaw_anchor(win1, win2)
             # Compare average physical yaw rate vs average sensor yaw rate
@@ -548,6 +598,8 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                 eskf_talos.update_zaru(g)
                 # Hardcoded low noise for verified zero-velocity updates
                 eskf_talos.update_velocity(np.zeros(3), R_obs=np.eye(3) * 1e-4)
+                zaru_fired = True
+                zaru_fire_count += 1
 
         # CAU - Continuous Attitude Update (TALOS only)
         # Piggybacks on ZARU's stillness detection: only fire when the user is
@@ -560,6 +612,8 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
             # Strictest threshold: match ZARU exactly.
             if gyro_var_cau < ZARU_THRESHOLD and accel_var_cau < ZARU_ACCEL_THRESHOLD:
                 eskf_talos.update_cau(a, accel_var_cau)
+                cau_fired = True
+                cau_fire_count += 1
 
 
         # ---------------------------------------------------------
@@ -575,10 +629,31 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
 
         head_vector = eskf_talos.position - evaluate_eskf._cage_center
         distance = np.linalg.norm(head_vector)
+        cage_clamped = False
 
         if distance > 0.50:
             eskf_talos.position = evaluate_eskf._cage_center + (head_vector / distance) * 0.50
             cage_clamp_count += 1
+            cage_clamped = True
+
+        diag_step_rows.append({
+            'step_idx': step,
+            'talos_x': float(eskf_talos.position[0]),
+            'talos_y': float(eskf_talos.position[1]),
+            'talos_z': float(eskf_talos.position[2]),
+            'pure_x': float(eskf_pure.position[0]),
+            'pure_y': float(eskf_pure.position[1]),
+            'pure_z': float(eskf_pure.position[2]),
+            'gt_x': float(gt_pos[step, 0]),
+            'gt_y': float(gt_pos[step, 1]),
+            'gt_z': float(gt_pos[step, 2]),
+            'talos_err_m': float(np.linalg.norm(eskf_talos.position - gt_pos[step])),
+            'pure_err_m': float(np.linalg.norm(eskf_pure.position - gt_pos[step])),
+            'yaw_err_deg_abs': float(diag_yaw_err_deg[-1]),
+            'cage_clamped': cage_clamped,
+            'zaru_fired': zaru_fired,
+            'cau_fired': cau_fired,
+        })
 
     talos_positions = np.array(talos_positions)
     pure_positions  = np.array(pure_positions)
@@ -620,11 +695,15 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
     plt.close()
 
     if neural_updates > 0:
-        generate_diagnostic_dashboard(diag_v_pred_local, diag_v_gt_local, diag_mahal_sq, 
+        generate_diagnostic_dashboard(diag_v_pred_local, diag_v_gt_local, diag_mahal_sq,
                                       diag_v_gt_mag, diag_pred_std, diag_abs_error,
                                       round_idx, plot_dir, slap_threshold=SLAP_THRESHOLD)
+
+    if neural_updates > 0:
         slap_rate = (slap_count / neural_updates) * 100
         print(f"  [Slap Gate] {slap_count}/{neural_updates} updates rejected ({slap_rate:.1f}%)")
+    else:
+        slap_rate = 0.0
 
     if len(diag_yaw_err_deg) > 0:
         yaw_err = np.array(diag_yaw_err_deg, dtype=np.float64)
@@ -638,6 +717,31 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
     cage_clamp_rate = (cage_clamp_count / len(df)) * 100
     if cage_clamp_count > 0:
         print(f"  [The Cage]  Head severed {cage_clamp_count}/{len(df)} frames ({cage_clamp_rate:.1f}%)")
+
+    pure_imu_ate = float(np.linalg.norm(pure_positions - gt_pos, axis=1).mean())
+    summary_row = {
+        'mean_ate_m': float(mean_ate),
+        'mean_rte_pct': float(mean_rte),
+        'final_ate_m': float(final_ate),
+        'final_rte_pct': float(final_rte),
+        'pure_imu_ate_m': pure_imu_ate,
+        'slap_count': int(slap_count),
+        'neural_updates': int(neural_updates),
+        'slap_rate_pct': float(slap_rate),
+        'cage_clamp_count': int(cage_clamp_count),
+        'cage_clamp_rate_pct': float(cage_clamp_rate),
+        'laid_veto_count': int(laid_veto_count),
+        'laid_veto_rate_pct': float((laid_veto_count / max(neural_updates + laid_veto_count, 1)) * 100.0),
+        'zaru_fire_count': int(zaru_fire_count),
+        'cau_fire_count': int(cau_fire_count),
+        'yaw_err_mean_deg': float(np.mean(diag_yaw_err_deg)) if len(diag_yaw_err_deg) > 0 else 0.0,
+        'yaw_err_p95_deg': float(np.percentile(diag_yaw_err_deg, 95)) if len(diag_yaw_err_deg) > 0 else 0.0,
+        'yaw_err_max_deg': float(np.max(diag_yaw_err_deg)) if len(diag_yaw_err_deg) > 0 else 0.0,
+        'slap_threshold': float(SLAP_THRESHOLD),
+        'r_obs_static_diag': float(R_OBS_STATIC_DIAG),
+    }
+    csv_path = append_eval_csv(plot_dir, round_idx, summary_row, diag_step_rows, diag_update_rows)
+    print(f"  [CSV]       telemetry appended -> {csv_path}")
 
     return mean_ate
 

@@ -1,5 +1,43 @@
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
+from pathlib import Path
+
+
+def append_eval_csv(run_dir: Path, round_num: int,
+                    summary_row: dict,
+                    step_rows: list[dict],
+                    update_rows: list[dict]) -> Path:
+    """Append one round of evaluation telemetry into a single run-level CSV.
+
+    Output schema is long-format with `row_type` in {summary, step, update}.
+    This allows all logging and plot-source data to be captured in one file
+    for downstream agents and analytics.
+    """
+    out_csv = run_dir / 'talos_eval_log.csv'
+
+    blocks = []
+
+    s = summary_row.copy()
+    s['round'] = round_num
+    s['row_type'] = 'summary'
+    blocks.append(pd.DataFrame([s]))
+
+    if step_rows:
+        step_df = pd.DataFrame(step_rows)
+        step_df['round'] = round_num
+        step_df['row_type'] = 'step'
+        blocks.append(step_df)
+
+    if update_rows:
+        upd_df = pd.DataFrame(update_rows)
+        upd_df['round'] = round_num
+        upd_df['row_type'] = 'update'
+        blocks.append(upd_df)
+
+    out_df = pd.concat(blocks, ignore_index=True, sort=False)
+    out_df.to_csv(out_csv, mode='a', header=not out_csv.exists(), index=False)
+    return out_csv
 
 def generate_diagnostic_dashboard(diag_v_pred_local, diag_v_gt_local, diag_mahal_sq, 
                                  diag_v_gt_mag, diag_pred_std, diag_abs_error,
