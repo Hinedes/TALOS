@@ -78,6 +78,8 @@ MAX_INNOVATION_NORM_MPS  = 8.0
 CAT_ATE_ABS_M            = 100.0
 CAT_ATE_BEST_MULT        = 8.0
 CAT_STRIKE_LIMIT         = 3
+SOFT_ATE_BEST_MULT       = 1.35
+SOFT_CAGE_CLAMP_PCT      = 45.0
 
 # Yaw-drift intervention (evaluation-time, conservative)
 ENABLE_YAW_ANCHOR        = False
@@ -861,6 +863,7 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
         'yaw_anchor_max_omega_mag': float(YAW_ANCHOR_MAX_OMEGA_MAG),
         'yaw_anchor_max_laid_rms': float(YAW_ANCHOR_MAX_LAID_RMS),
     }
+    evaluate_eskf._last_summary = summary_row
     csv_path = append_eval_csv(plot_dir, round_idx, summary_row, diag_step_rows, diag_update_rows)
     print(f"  [CSV]       telemetry appended -> {csv_path}")
 
@@ -957,6 +960,7 @@ def main():
     best_ate_ever = float('inf')
     best_ate_round = -1
     cat_strikes = 0
+    soft_quarantines = 0
 
     best_loss_ever       = float('inf')
     loss_stagnant_rounds = 0
@@ -1051,6 +1055,33 @@ def main():
                 break
 
             # Do not consume a physical-overfitting strike for quarantined rounds
+            continue
+
+        # Soft quarantine for toxic-but-noncatastrophic rounds
+        eval_summary = getattr(evaluate_eskf, '_last_summary', {})
+        cage_pct = float(eval_summary.get('cage_clamp_rate_pct', 0.0))
+        soft_limit = best_ate_ever * SOFT_ATE_BEST_MULT if np.isfinite(best_ate_ever) else float('inf')
+        if np.isfinite(best_ate_ever) and (mean_ate > soft_limit) and (cage_pct > SOFT_CAGE_CLAMP_PCT):
+            soft_quarantines += 1
+            print(f"\n!! SOFT QUARANTINE: ATE {mean_ate:.3f}m (> {soft_limit:.3f}m) with cage clamp {cage_pct:.1f}%.")
+            print(f"   [Quarantine] Soft strike {soft_quarantines} on sequence {sid[:40]}...")
+
+            if subject_pool:
+                subject_pool.pop()
+                train_data = None
+                for p_data in subject_pool:
+                    train_data = accumulate(train_data, p_data)
+                if train_data is not None:
+                    print(f"   [Quarantine] Pool reverted to {train_data['trans'].shape[0]:,} windows")
+
+            best_ckpt = run_dir / 'talos_best_physical.pth'
+            if best_ckpt.exists():
+                model.load_state_dict(torch.load(best_ckpt, map_location=device, weights_only=False))
+                torch.save(model.state_dict(), golden / 'talos.pth')
+                print("   [Rollback] Restored last best physical checkpoint")
+
+            history.append({'round': round_idx, 'ate': mean_ate, 'train_loss': train_final})
+            update_master_dashboard(history, run_dir / 'master_telemetry.png')
             continue
 
         history.append({'round': round_idx, 'ate': mean_ate, 'train_loss': train_final})
