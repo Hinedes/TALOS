@@ -215,7 +215,7 @@ class ESKF:
         K = self.P @ H.T / S[0, 0]
         # Isolate to gyro bias Z only
         K_masked = np.zeros(15)
-        K_masked[11] = K[11]
+        K_masked[11] = K[11].item()
         dx = K_masked * z[0]
         dx[11] = np.clip(dx[11], -0.01, 0.01)  # limit bias correction [rad/s]
         self.bg[2] += dx[11]
@@ -470,8 +470,8 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
             laid_veto, laid_rms = laid_bouncer.check(win1, win2)
             if not laid_veto:
                 v_world = eskf_talos.orientation @ pred_delta_np
-                # "Healthy Skepticism": increased R_obs from 0.01 to 0.1
-                R_obs_static = np.eye(3) * 0.1
+                # "Healthy Skepticism": re-tuned from 0.1 to 0.05
+                R_obs_static = np.eye(3) * 0.05
                 neural_updates += 1
                 accepted, mahal_sq = eskf_talos.update_velocity(v_world, R_obs=R_obs_static)
                 if accepted is False:
