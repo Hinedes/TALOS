@@ -464,11 +464,12 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
             win_tensor = torch.tensor((win * 100.0).T[np.newaxis], dtype=torch.float32)  # (1, 6, 64)
 
             with torch.no_grad():
-                pred_delta, pred_cov = model(win_tensor.to(device))
+                pred_vel, pred_cov = model(win_tensor.to(device))
 
-            pred_delta_np = pred_delta.cpu().numpy()[0]
-            pred_delta_np = bulwark(pred_delta_np)
-            pred_cov_np   = pred_cov.cpu().numpy()[0]
+            # The network outputs mean velocity (m/s), NOT displacement.
+            pred_vel_local = pred_vel.cpu().numpy()[0]
+            pred_vel_local = bulwark(pred_vel_local)
+            pred_cov_np    = pred_cov.cpu().numpy()[0]
 
             # LAID veto
             win2_accel = np.array(accel2_buf)
@@ -477,9 +478,9 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
             win1       = np.concatenate([win_accel_corrected, win_gyro], axis=-1)
             laid_veto, laid_rms = laid_bouncer.check(win1, win2)
             if not laid_veto:
-                v_world = eskf_talos.orientation @ pred_delta_np
-                # "Healthy Skepticism": re-tuned from 0.1 to 0.05
-                R_obs_static = np.eye(3) * 0.05
+                # Direct rotation from local velocity to world velocity
+                v_world = eskf_talos.orientation @ pred_vel_local
+                R_obs_static = np.eye(3) * 0.1
                 neural_updates += 1
                 accepted, mahal_sq = eskf_talos.update_velocity(v_world, R_obs=R_obs_static)
                 if accepted is False:
@@ -487,7 +488,7 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                     
                 # --- Capture Lens 1 & 2 Data ---
                 # Current local prediction from model (already in m/s)
-                pred_v_local = pred_delta_np.copy()
+                pred_v_local = pred_vel_local.copy()
                 
                 # Calculate Ground Truth (GT) Local Velocity
                 # Calculate Ground Truth (GT) Local Velocity via positional finite differences

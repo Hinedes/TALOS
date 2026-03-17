@@ -1,6 +1,12 @@
-    # TALOS NIO — Neural-Inertial Odometry Pipeline
+> [!NOTE]
+> ## Changelog / Reality Check — March 17, 2026
+> 1. **Overlord velocity semantics:** Overlord (SpectralMLP) now predicts **pure mean velocity (m/s)** directly — not displacement. The `head_quat` output branch has been removed. `pred_delta` renamed to `pred_vel_local` throughout the inference path. No `/window_time` division at inference time.
+> 2. **ZARU quarantine:** `update_zaru()` now uses the **Joseph form** covariance update and hard-zeros the Kalman gain for all states except gyro bias (rows 9–11). Gyro stillness cannot corrupt position, velocity, orientation, or accel bias.
+> 3. **LR scheduler:** Transitioned from `OneCycleLR` to **`ReduceLROnPlateau` on validation loss**. The learning rate now decays only when the held-out set stops improving — not when the training set plateaus due to class imbalance.
+
+# TALOS NIO — Neural-Inertial Odometry Pipeline
 ### Open-Source 6-DOF Spatial Tracking for Mixed Reality Hardware
-**Ground Truth State: March 10, 2026**
+**Ground Truth State: March 17, 2026**
 
 ---
 
