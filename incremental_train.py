@@ -77,6 +77,7 @@ MAX_PRED_WORLD_SPEED_MPS = 6.0
 MAX_INNOVATION_NORM_MPS  = 8.0
 CAT_ATE_ABS_M            = 100.0
 CAT_ATE_BEST_MULT        = 8.0
+CAT_STRIKE_LIMIT         = 3
 
 # Yaw-drift intervention (evaluation-time, conservative)
 ENABLE_YAW_ANCHOR        = False
@@ -955,6 +956,7 @@ def main():
     bad_rounds    = 0
     best_ate_ever = float('inf')
     best_ate_round = -1
+    cat_strikes = 0
 
     best_loss_ever       = float('inf')
     loss_stagnant_rounds = 0
@@ -1019,10 +1021,37 @@ def main():
         # Catastrophic divergence breaker -- abort early instead of burning rounds
         cat_limit = max(CAT_ATE_ABS_M, best_ate_ever * CAT_ATE_BEST_MULT if np.isfinite(best_ate_ever) else CAT_ATE_ABS_M)
         if mean_ate > cat_limit:
-            print(f"\n!! CATASTROPHIC DIVERGENCE: ATE {mean_ate:.3f}m exceeded limit {cat_limit:.3f}m. Halting.")
+            cat_strikes += 1
+            print(f"\n!! CATASTROPHIC DIVERGENCE: ATE {mean_ate:.3f}m exceeded limit {cat_limit:.3f}m.")
+            print(f"   [Quarantine] Strike {cat_strikes}/{CAT_STRIKE_LIMIT} on sequence {sid[:40]}...")
+
+            # Quarantine the just-added sequence from the subject pool
+            if subject_pool:
+                subject_pool.pop()
+                train_data = None
+                for p_data in subject_pool:
+                    train_data = accumulate(train_data, p_data)
+                if train_data is not None:
+                    print(f"   [Quarantine] Pool reverted to {train_data['trans'].shape[0]:,} windows")
+
+            # Roll back model weights to last known best physical checkpoint
+            best_ckpt = run_dir / 'talos_best_physical.pth'
+            if best_ckpt.exists():
+                model.load_state_dict(torch.load(best_ckpt, map_location=device, weights_only=False))
+                torch.save(model.state_dict(), golden / 'talos.pth')
+                print("   [Rollback] Restored last best physical checkpoint")
+            else:
+                print("   [Rollback] No physical checkpoint yet; keeping current weights")
+
             history.append({'round': round_idx, 'ate': mean_ate, 'train_loss': train_final})
             update_master_dashboard(history, run_dir / 'master_telemetry.png')
-            break
+
+            if cat_strikes >= CAT_STRIKE_LIMIT:
+                print(f"\n!! CATASTROPHIC DIVERGENCE LIMIT REACHED ({CAT_STRIKE_LIMIT}). Halting.")
+                break
+
+            # Do not consume a physical-overfitting strike for quarantined rounds
+            continue
 
         history.append({'round': round_idx, 'ate': mean_ate, 'train_loss': train_final})
         update_master_dashboard(history, run_dir / 'master_telemetry.png')
