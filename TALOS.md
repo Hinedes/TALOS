@@ -1,4 +1,4 @@
-# TALOS NIO — Neural-Inertial Odometry Pipeline
+    # TALOS NIO — Neural-Inertial Odometry Pipeline
 ### Open-Source 6-DOF Spatial Tracking for Mixed Reality Hardware
 **Ground Truth State: March 10, 2026**
 

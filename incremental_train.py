@@ -40,13 +40,14 @@ from npp import NPPTracker
 from nymeria_loader import (load_sequence, load_sequence_cached, load_imu_stream, align_imu_streams,
                             load_gt_trajectory, interpolate_gt,
                             SID_RIGHT, SID_LEFT, TARGET_HZ)
+from telemetry import generate_diagnostic_dashboard
 
 # Configuration
 PATIENCE               = 15      # ESKF ATE strikes before halting (physical overfitting)
 LOSS_PATIENCE          = 20     # Loss stagnation strikes before halting (dead model)
 LOSS_MIN_DELTA         = 1e-5   # Minimum loss improvement to count as progress
-WARMUP_LOSS_THRESHOLD  = 0.10   # Don't run ESKF eval until loss drops below this
-STORAGE_FLOOR_GB       = 30.0
+WARMUP_LOSS_THRESHOLD  = 1.0    # Don't run ESKF eval until loss drops below this
+STORAGE_FLOOR_GB       = 50.0
 EPOCHS_PER_ROUND       = 20
 BATCH_SIZE             = 4096
 VAL_SUBJECT            = 'shelby_arroyo'  # 63m locomotion stress test
@@ -99,9 +100,9 @@ class ESKF:
         F[6:9, 9:12]  = -R * dt
         self.P = F @ self.P @ F.T + self.Q
 
-    def update_velocity(self, vel, R_obs, slap_threshold=3.0):
-        """ESKF velocity update with Mahalanobis Slap Gate (threshold=3.0)."""
-        if not np.all(np.isfinite(vel)): return
+    def update_velocity(self, vel, R_obs, slap_threshold=5.0):
+        """ESKF velocity update with Mahalanobis Slap Gate (threshold=5.0)."""
+        if not np.all(np.isfinite(vel)): return False, 0.0
         H = np.zeros((3, 15))
         H[0,3] = H[1,4] = H[2,5] = 1.0
 
@@ -112,7 +113,7 @@ class ESKF:
         # The Slap -- Mahalanobis innovation gate
         mahal_sq = float(r @ S_inv @ r)
         if mahal_sq > slap_threshold ** 2:
-            return  # slapped -- update silently rejected
+            return False, mahal_sq  # slapped -- update silently rejected
 
         # Reuse S_inv for Kalman gain (zero redundant computation)
         K = self.P @ H.T @ S_inv
@@ -124,6 +125,7 @@ class ESKF:
         self.position += dx[0:3]
         self.velocity += dx[3:6]
         self.P = (np.eye(15) - K @ H) @ self.P
+        return True, mahal_sq
 
     def update_zaru(self, gyro_raw):
         H = np.zeros((3, 15))
@@ -310,23 +312,23 @@ def train_round(model, opt, sched, train_data, val_data, device, epochs, checkpo
 
     best_val, t_losses = float('inf'), []
 
-    def loss_fn(pt, pq, pcov, gt, gq):
-        # Pure MSE for translation — covariance head is unused since eval uses static R_obs.
-        # This eliminates the Gaussian covariance collapse at the source.
+    def loss_fn(pt, pcov, gt):
+        # Pure MSE for translation — covariance head was previously dead.
         lt = F.mse_loss(pt, gt)
         
-        # Standard cosine-like loss for quaternion orientation
-        lq = 1.0 - (pq * gq).sum(dim=1).abs().mean()
+        # NLL auxiliary loss strictly to force network to calibrate its uncertainty for Lens 3.
+        # This keeps the physical ESKF update using static R_obs stable.
+        l_nll = F.gaussian_nll_loss(pt, gt, torch.exp(pcov), full=False)
         
-        return lt + 0.1 * lq
+        return lt + 0.1 * l_nll
 
     for epoch in range(epochs):
         model.train()
         ep_loss = 0.0
         for xb, tb, qb in loader:
             opt.zero_grad()
-            pt, pq, pcov = model(xb)
-            loss = loss_fn(pt, pq, pcov, tb, qb)
+            pt, pcov = model(xb)
+            loss = loss_fn(pt, pcov, tb)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             opt.step()
@@ -336,8 +338,8 @@ def train_round(model, opt, sched, train_data, val_data, device, epochs, checkpo
 
         model.eval()
         with torch.no_grad():
-            pvt, pvq, pvcov = model(X_va)
-            v_loss = loss_fn(pvt, pvq, pvcov, T_va, Q_va)
+            pvt, pvcov = model(X_va)
+            v_loss = loss_fn(pvt, pvcov, T_va)
 
         if v_loss.item() < best_val:
             best_val = v_loss.item()
@@ -396,6 +398,22 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
     talos_positions, pure_positions = [], []
     window_time = WINDOW_SIZE * dt
 
+    slap_count = 0
+    neural_updates = 0
+
+    # --- Diagnostic Lens Buffers ---
+    # Lens 1: Scale Collapse
+    diag_v_pred_local = []
+    diag_v_gt_local   = []
+
+    # Lens 2: Filter Tension
+    diag_mahal_sq     = []
+    diag_v_gt_mag     = []
+
+    # Lens 3: Covariance Shadowing
+    diag_pred_std     = []
+    diag_abs_error    = []
+
     for step in range(len(df)):
         a, g = accel[step], gyro[step]
         a2_sample = accel2[step]
@@ -427,30 +445,63 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
             win_accel = np.array(accel_buf)
             win_gyro  = np.array(gyro_buf)
             
-            # Zero out the gravity/DC component for inference
-            win_accel_corrected = win_accel - np.mean(win_accel, axis=0)
+            # KEEP the gravity/DC component for inference
+            win_accel_corrected = win_accel
             
             win = np.concatenate([win_accel_corrected, win_gyro], axis=-1)
             win_tensor = torch.tensor(win.T[np.newaxis], dtype=torch.float32)  # (1, 6, 64)
 
             with torch.no_grad():
-                pred_delta, _, pred_cov = model(win_tensor.to(device))
+                pred_delta, pred_cov = model(win_tensor.to(device))
 
             pred_delta_np = pred_delta.cpu().numpy()[0]
             pred_delta_np = bulwark(pred_delta_np)
             pred_cov_np   = pred_cov.cpu().numpy()[0]
 
             # LAID veto
-            win2_accel = np.array(accel2_buf) - np.mean(np.array(accel2_buf), axis=0)
+            win2_accel = np.array(accel2_buf)
             win2_gyro  = np.array(gyro2_buf)
             win2       = np.concatenate([win2_accel, win2_gyro], axis=-1)
             win1       = np.concatenate([win_accel_corrected, win_gyro], axis=-1)
             laid_veto, laid_rms = laid_bouncer.check(win1, win2)
             if not laid_veto:
-                v_world = eskf_talos.orientation @ (pred_delta_np / window_time)
+                v_world = eskf_talos.orientation @ pred_delta_np
                 # Ignore pred_cov_np to prevent Gaussian Covariance Collapse.
-                R_obs_static = np.eye(3) * 0.1
-                eskf_talos.update_velocity(v_world, R_obs=R_obs_static)
+                R_obs_static = np.eye(3) * 0.01
+                neural_updates += 1
+                accepted, mahal_sq = eskf_talos.update_velocity(v_world, R_obs=R_obs_static)
+                if accepted is False:
+                    slap_count += 1
+                    
+                # --- Capture Lens 1 & 2 Data ---
+                # Current local prediction from model (already in m/s)
+                pred_v_local = pred_delta_np.copy()
+                
+                # Calculate Ground Truth (GT) Local Velocity
+                # Calculate Ground Truth (GT) Local Velocity via positional finite differences
+                # The purest measure of average velocity over a finite window
+                gt_pos_world_start = df[['px','py','pz']].iloc[max(0, step - WINDOW_SIZE)].values
+                gt_pos_world_end   = df[['px','py','pz']].iloc[step].values
+                gt_mean_v_world    = (gt_pos_world_end - gt_pos_world_start) / (WINDOW_SIZE * dt)
+                
+                # Rotate GT to Local Frame using GT orientation (Isolates neural error from filter drift)
+                q_gt_current = df[['qx','qy','qz','qw']].iloc[step].values
+                R_gt_current = Rotation.from_quat(q_gt_current).as_matrix()
+                gt_v_local   = R_gt_current.T @ gt_mean_v_world
+                
+                # --- Store Telemetry ---
+                diag_v_pred_local.append(pred_v_local)
+                diag_v_gt_local.append(gt_v_local)
+                diag_mahal_sq.append(mahal_sq)
+                diag_v_gt_mag.append(np.linalg.norm(gt_v_local))
+                
+                # --- Capture Lens 3: Covariance Shadowing ---
+                # Convert LogVar to Standard Deviation
+                current_std = np.exp(pred_cov_np / 2.0)
+                current_err = np.abs(pred_v_local - gt_v_local)
+                
+                diag_pred_std.append(current_std)
+                diag_abs_error.append(current_err)
 
             # LAID yaw anchor -- physics-based yaw correction, independent of Overlord
             omega_yaw, yaw_trust, omega_mag = laid_bouncer.yaw_anchor(win1, win2)
@@ -535,6 +586,12 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
     plt.tight_layout()
     plt.savefig(plot_dir / f'eskf_eval_round_{round_idx}.png', dpi=150)
     plt.close()
+
+    if neural_updates > 0:
+        generate_diagnostic_dashboard(diag_v_pred_local, diag_v_gt_local, diag_mahal_sq, 
+                                      diag_v_gt_mag, diag_pred_std, diag_abs_error, round_idx, plot_dir)
+        slap_rate = (slap_count / neural_updates) * 100
+        print(f"  [Slap Gate] {slap_count}/{neural_updates} updates rejected ({slap_rate:.1f}%)")
 
     return mean_ate
 

@@ -20,7 +20,6 @@ class SpectralMLPNPU(nn.Module):
         self.fc3 = nn.Linear(128, 64)
         self.bn3 = nn.BatchNorm1d(64)
         self.head_trans = nn.Linear(64, 3)
-        self.head_quat  = nn.Linear(64, 4)
         self.head_cov   = nn.Linear(64, 3)
         nn.init.zeros_(self.head_cov.weight)
         nn.init.zeros_(self.head_cov.bias)
@@ -30,7 +29,7 @@ class SpectralMLPNPU(nn.Module):
         x = F.relu(self.bn1(self.fc1(x)))
         x = F.relu(self.bn2(self.fc2(x)))
         x = F.relu(self.bn3(self.fc3(x)))
-        return self.head_trans(x), F.normalize(self.head_quat(x), p=2, dim=-1), self.head_cov(x)
+        return self.head_trans(x), self.head_cov(x)
 
 class SpectralMLP(nn.Module):
     def __init__(self):
@@ -49,6 +48,6 @@ if __name__ == '__main__':
     model = SpectralMLP()
     print(f"Total Parameters: {sum(p.numel() for p in model.parameters()):,}")
     dummy = torch.randn(4, 6, 64)
-    t, q, lv = model(dummy)
-    print(f"Translation: {t.shape}, Quat: {q.shape}, LogVar: {lv.shape}")
-    print(f"Quat norm: {q.norm(dim=-1).mean():.6f}, LogVar init: {lv.mean():.6f}")
+    t, lv = model(dummy)
+    print(f"Translation: {t.shape}, LogVar: {lv.shape}")
+    print(f"LogVar init: {lv.mean():.6f}")

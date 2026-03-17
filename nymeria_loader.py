@@ -116,20 +116,9 @@ def make_windows(imu1, imu2, pos, quat, window, stride, augment=True):
 
         # --- Data Augmentation (training only) ---
         if augment:
-            # A. Random yaw rotation — heading equivariance
-            #    Rotate accel, gyro, and labels identically around gravity axis
-            R_yaw = _random_yaw_rotation()
-            imu_window[:, :3] = (R_yaw @ imu_window[:, :3].T).T   # accel
-            imu_window[:, 3:] = (R_yaw @ imu_window[:, 3:].T).T   # gyro
-            delta_p_local     = R_yaw @ delta_p_local              # translation label
-
-            R_yaw_rot    = Rotation.from_matrix(R_yaw)
-            q_orig       = Rotation.from_quat([q_delta_wxyz[1], q_delta_wxyz[2],
-                                                q_delta_wxyz[3], q_delta_wxyz[0]])  # WXYZ→XYZW
-            q_rot        = R_yaw_rot * q_orig
-            q_rot_xyzw   = q_rot.as_quat()
-            q_delta_wxyz = np.array([q_rot_xyzw[3], q_rot_xyzw[0],
-                                     q_rot_xyzw[1], q_rot_xyzw[2]], dtype=np.float32)
+            # A. Random yaw rotation REMOVED — With the DC (Gravity) component preserved, 
+            #    randomly rotating the world frame "tilts" the earth dynamically and 
+            #    destroys the physical learning correlation for pitch/roll.
 
             # B. Noise injection — domain gap bridging
             #    Gaussian noise + per-window constant bias to simulate different IMU sensors
@@ -140,14 +129,19 @@ def make_windows(imu1, imu2, pos, quat, window, stride, augment=True):
             imu_window[:, :3] += accel_noise + accel_bias
             imu_window[:, 3:] += gyro_noise  + gyro_bias
 
-        # Zero out the gravity/DC component (after augmentation so bias doesn't leak into DC)
-        imu_window[:, :3] = imu_window[:, :3] - np.mean(imu_window[:, :3], axis=0)
+        # Gravity/DC component is deliberately preserved for postural context.
+        # imu_window[:, :3] = imu_window[:, :3] - np.mean(imu_window[:, :3], axis=0)
 
         imu2_window = imu2[s:e].copy()
-        imu2_window[:, :3] -= np.mean(imu2_window[:, :3], axis=0)
+        # imu2_window[:, :3] -= np.mean(imu2_window[:, :3], axis=0)
         imu1_windows.append(imu_window.astype(np.float32))
         imu2_windows.append(imu2_window.astype(np.float32))
-        trans_labels.append(delta_p_local.astype(np.float32))
+        
+        # Convert displacement to mean velocity (m/s)
+        window_time = window / TARGET_HZ
+        mean_velocity = delta_p_local / window_time
+        trans_labels.append(mean_velocity.astype(np.float32))
+        
         quat_labels.append(q_delta_wxyz)
 
     return {
