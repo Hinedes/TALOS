@@ -199,7 +199,7 @@ class ESKF:
         
         self.P = (np.eye(15) - K @ H) @ self.P
 
-            # DISABLED: def update_yaw_anchor(self, omega_yaw_obs, gyro_z_raw, trust):
+    def update_yaw_anchor(self, omega_yaw_obs, gyro_z_raw, trust):
         """LAID yaw rate pseudo-measurement targeting gyro bias Z (index 11).
         Residual is rate vs rate -- dimensionally consistent [rad/s].
         ESKF propagates bg_z correction into orientation via F[6:9,9:12] coupling.
@@ -509,7 +509,7 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
 
             # LAID yaw anchor -- physics-based yaw correction, independent of Overlord
             omega_yaw, yaw_trust, omega_mag = laid_bouncer.yaw_anchor(win1, win2)
-            # DISABLED: eskf_talos.update_yaw_anchor(omega_yaw, gyro[-1, 2], yaw_trust)
+            eskf_talos.update_yaw_anchor(omega_yaw, gyro[-1, 2], yaw_trust)
 
         # ZARU (TALOS only)
         if len(gyro_buf) >= ZARU_WINDOW and step % ZARU_WINDOW == 0:
@@ -711,6 +711,12 @@ def main():
         try:
             new_data   = load_sequence_cached(seq_path)
             train_data = accumulate(train_data, new_data)
+            
+            # --- SURGICAL FIX: Reset stagnation trackers ---
+            # The dataset has changed, so the loss baseline must be reset.
+            best_loss_ever = float('inf')
+            loss_stagnant_rounds = 0
+            
         except Exception as e:
             print(f"  !! Load failed: {e}")
             continue
