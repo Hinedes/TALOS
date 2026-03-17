@@ -2,7 +2,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 def generate_diagnostic_dashboard(diag_v_pred_local, diag_v_gt_local, diag_mahal_sq, 
-                                 diag_v_gt_mag, diag_pred_std, diag_abs_error, round_num, run_dir):
+                                 diag_v_gt_mag, diag_pred_std, diag_abs_error,
+                                 round_num, run_dir, slap_threshold=5.0):
     # Convert lists to numpy arrays for easier indexing
     v_pred = np.array(diag_v_pred_local)
     v_gt = np.array(diag_v_gt_local)
@@ -27,8 +28,10 @@ def generate_diagnostic_dashboard(diag_v_pred_local, diag_v_gt_local, diag_mahal
 
     # --- LENS 2: Filter Tension (Slap Timeline) ---
     time_axis = np.arange(len(mahal))
+    slap_threshold_sq = slap_threshold ** 2
     axs[1].plot(time_axis, mahal, color='black', alpha=0.6, label='Mahal Distance²')
-    axs[1].fill_between(time_axis, 0, mahal, where=(mahal > 25.0), color='red', alpha=0.3, label='SLAP (Threshold 5.0²)')
+    axs[1].fill_between(time_axis, 0, mahal, where=(mahal > slap_threshold_sq), color='red', alpha=0.3,
+                        label=f'SLAP (Threshold {slap_threshold:.1f}²)')
     ax2_twin = axs[1].twinx()
     ax2_twin.plot(time_axis, gt_mag, color='green', alpha=0.4, label='GT Speed (m/s)')
     axs[1].set_title('Lens 2: Slap Gate Timeline / Tension', fontsize=14)

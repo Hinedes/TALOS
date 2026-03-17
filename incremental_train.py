@@ -64,6 +64,10 @@ ZARU_WINDOW          = 50
 ZARU_THRESHOLD       = 1e-4
 ZARU_ACCEL_THRESHOLD = 5e-3  # Dual-sensor lock requirement
 
+# Evaluation fusion tuning profile (safe test preset)
+SLAP_THRESHOLD       = 4.0
+R_OBS_STATIC_DIAG    = 0.2
+
 # ESKF Physics Engine
 class ESKF:
     def __init__(self, dt=0.01, gravity=None):
@@ -389,6 +393,7 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
     accel2 = df[['ax2','ay2','az2']].values.astype(np.float32)
     gyro2  = df[['wx2','wy2','wz2']].values.astype(np.float32)
     gyro   = df[['wx','wy','wz']].values.astype(np.float32)
+    gt_quat = df[['qx','qy','qz','qw']].values.astype(np.float32)
     gt_pos = df[['px','py','pz']].values
     gt_pos = gt_pos - gt_pos[0]
 
@@ -424,6 +429,7 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
     # Lens 3: Covariance Shadowing
     diag_pred_std     = []
     diag_abs_error    = []
+    diag_yaw_err_deg  = []
 
     for step in range(len(df)):
         a, g = accel[step], gyro[step]
@@ -436,6 +442,13 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
         v_device = eskf_talos.orientation.T @ eskf_talos.velocity
         npp_tracker.update(g, v_device)
         # HALO orientation cage disabled -- requires torso reference frame
+
+        # Yaw drift telemetry: heading error of TALOS orientation vs GT orientation
+        R_gt_current = Rotation.from_quat(gt_quat[step]).as_matrix()
+        R_heading_err = R_gt_current.T @ eskf_talos.orientation
+        yaw_err_deg = Rotation.from_matrix(R_heading_err).as_euler('ZYX', degrees=True)[0]
+        yaw_err_deg = ((yaw_err_deg + 180.0) % 360.0) - 180.0
+        diag_yaw_err_deg.append(abs(yaw_err_deg))
 
         talos_positions.append(eskf_talos.position.copy())
         pure_positions.append(eskf_pure.position.copy())
@@ -480,9 +493,13 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
             if not laid_veto:
                 # Direct rotation from local velocity to world velocity
                 v_world = eskf_talos.orientation @ pred_vel_local
-                R_obs_static = np.eye(3) * 0.1
+                R_obs_static = np.eye(3) * R_OBS_STATIC_DIAG
                 neural_updates += 1
-                accepted, mahal_sq = eskf_talos.update_velocity(v_world, R_obs=R_obs_static)
+                accepted, mahal_sq = eskf_talos.update_velocity(
+                    v_world,
+                    R_obs=R_obs_static,
+                    slap_threshold=SLAP_THRESHOLD,
+                )
                 if accepted is False:
                     slap_count += 1
                     
@@ -604,9 +621,19 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
 
     if neural_updates > 0:
         generate_diagnostic_dashboard(diag_v_pred_local, diag_v_gt_local, diag_mahal_sq, 
-                                      diag_v_gt_mag, diag_pred_std, diag_abs_error, round_idx, plot_dir)
+                                      diag_v_gt_mag, diag_pred_std, diag_abs_error,
+                                      round_idx, plot_dir, slap_threshold=SLAP_THRESHOLD)
         slap_rate = (slap_count / neural_updates) * 100
         print(f"  [Slap Gate] {slap_count}/{neural_updates} updates rejected ({slap_rate:.1f}%)")
+
+    if len(diag_yaw_err_deg) > 0:
+        yaw_err = np.array(diag_yaw_err_deg, dtype=np.float64)
+        print(
+            "  [Yaw Drift] "
+            f"mean={np.mean(yaw_err):.2f}° "
+            f"p95={np.percentile(yaw_err, 95):.2f}° "
+            f"max={np.max(yaw_err):.2f}°"
+        )
         
     cage_clamp_rate = (cage_clamp_count / len(df)) * 100
     if cage_clamp_count > 0:
