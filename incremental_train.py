@@ -99,6 +99,9 @@ class ESKF:
         F[3:6, 12:15] = -R * dt
         F[6:9, 9:12]  = -R * dt
         self.P = F @ self.P @ F.T + self.Q
+        # SO(3) orthogonalization: prevent floating-point drift from corrupting rotation matrix
+        U, _, Vt = np.linalg.svd(self.orientation)
+        self.orientation = U @ Vt
 
     def update_velocity(self, vel, R_obs, slap_threshold=5.0):
         """ESKF velocity update with Mahalanobis Slap Gate (threshold=5.0)."""
@@ -129,25 +132,26 @@ class ESKF:
 
     def update_zaru(self, gyro_raw):
         H = np.zeros((3, 15))
-        H[0:3, 9:12] = -np.eye(3)  # CORRECTED: States 9:12 target the gyro bias
+        H[0:3, 9:12] = -np.eye(3)
         
         R_z = np.eye(3) * 1e-4
         z   = -(gyro_raw - self.bg)
         S   = H @ self.P @ H.T + R_z
         
-        # Robust matrix solve
         K = np.linalg.solve(S.T, (self.P @ H.T).T).T
-        dx  = K @ z
         
-        self.position    += dx[0:3]
-        self.velocity    += dx[3:6]
+        # ZARU quarantine: gyro stillness tells us nothing about pos, vel, ori, or accel bias
+        K[0:9, :]  = 0.0
+        K[12:15, :] = 0.0
         
-        # Orientation is untouched by ZARU. It is unobservable here.
-        # The Alpha Gate: Dampen bias updates
+        dx = K @ z
         self.bg += dx[9:12] * 0.1
-        self.ba += dx[12:15] * 0.1
         
-        self.P  = (np.eye(15) - K @ H) @ self.P
+        # Joseph form: guarantees P stays symmetric and positive-definite
+        I   = np.eye(15)
+        IKH = I - K @ H
+        self.P = IKH @ self.P @ IKH.T + K @ R_z @ K.T
+        self.P = 0.5 * (self.P + self.P.T)
 
     def update_cau(self, accel_raw, accel_var):
         """Continuous Attitude Update: Observes gravity via raw accelerometer to correct pitch/roll.
@@ -339,12 +343,13 @@ def train_round(model, opt, sched, train_data, val_data, device, epochs, checkpo
             opt.step()
             ep_loss += loss.item()
         t_losses.append(ep_loss / len(loader))
-        sched.step(t_losses[-1])
 
         model.eval()
         with torch.no_grad():
             pvt, pvcov = model(X_va)
             v_loss = loss_fn(pvt, pvcov, T_va)
+
+        sched.step(v_loss.item())
 
         if v_loss.item() < best_val:
             best_val = v_loss.item()
@@ -560,7 +565,7 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
     talos_positions = np.array(talos_positions)
     pure_positions  = np.array(pure_positions)
     evaluate_eskf._last_talos_pos = talos_positions
-    evaluate_eskf._last_gt_pos    = pure_positions
+    evaluate_eskf._last_gt_pos    = gt_pos
     talos_err       = np.linalg.norm(talos_positions - gt_pos, axis=1)
     mean_ate        = talos_err.mean()
     final_ate       = talos_err[-1]
