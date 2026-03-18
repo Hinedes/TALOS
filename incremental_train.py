@@ -65,10 +65,10 @@ ZARU_THRESHOLD       = 1e-4
 ZARU_ACCEL_THRESHOLD = 5e-3  # Dual-sensor lock requirement
 
 # Evaluation fusion tuning profile (safe test preset)
-SLAP_THRESHOLD       = 2.0
+SLAP_THRESHOLD       = 5.0
 R_OBS_MIN_DIAG       = 0.05
-R_OBS_MAX_DIAG       = 0.30
-USE_DYNAMIC_R_OBS    = False
+R_OBS_MAX_DIAG       = 2.00
+USE_DYNAMIC_R_OBS    = True
 R_OBS_FIXED_DIAG     = 0.10
 PRED_VEL_GAIN        = 1.00
 
@@ -88,7 +88,7 @@ YAW_ANCHOR_MAX_OMEGA_MAG = 4.0
 YAW_ANCHOR_MAX_LAID_RMS  = 0.6
 
 # LAID differential gyro-bias update (measurement-space, tightly coupled)
-ENABLE_LAID_DIFF_UPDATE  = True
+ENABLE_LAID_DIFF_UPDATE  = False
 LAID_DIFF_MIN_OMEGA_MAG  = 0.10
 LAID_DIFF_R_DIAG         = 50.0
 LAID_DIFF_GATE_THRESHOLD = 4.0
