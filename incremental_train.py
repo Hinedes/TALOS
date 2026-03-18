@@ -88,6 +88,12 @@ YAW_ANCHOR_MIN_TRUST     = 0.35
 YAW_ANCHOR_MAX_OMEGA_MAG = 4.0
 YAW_ANCHOR_MAX_LAID_RMS  = 0.6
 
+# LAID differential gyro-bias update (measurement-space, tightly coupled)
+ENABLE_LAID_DIFF_UPDATE  = False
+LAID_DIFF_MIN_OMEGA_MAG  = 0.10
+LAID_DIFF_R_DIAG         = 0.20
+LAID_DIFF_GATE_THRESHOLD = 4.0
+
 # ESKF Physics Engine
 class ESKF:
     def __init__(self, dt=0.01, gravity=None):
@@ -254,6 +260,68 @@ class ESKF:
         self.bg[2] += dx[11]
         self.P = (np.eye(15) - np.outer(K_masked, H[0])) @ self.P
         return True
+
+    def update_laid_differential(self, a1, g1, a2, alpha_meas, r, R_laid=None,
+                                 gate_threshold=4.0, min_omega_mag=0.10):
+        """Tightly-coupled LAID differential update for gyro bias states [9:12].
+
+        Measurement model:
+            z_hat = omega x (omega x r) + alpha x r
+            omega = g1 - bg
+            y = (a2 - a1) - z_hat
+
+        Jacobian for gyro-bias states:
+            H_bg = -(omega^x @ r^x + (omega x r)^x)
+        """
+        a1 = np.asarray(a1, dtype=np.float64)
+        g1 = np.asarray(g1, dtype=np.float64)
+        a2 = np.asarray(a2, dtype=np.float64)
+        alpha = np.asarray(alpha_meas, dtype=np.float64)
+        r = np.asarray(r, dtype=np.float64)
+
+        omega = g1 - self.bg
+        omega_mag = float(np.linalg.norm(omega))
+        if omega_mag < float(min_omega_mag):
+            return False, 0.0, 0.0, 0.0
+
+        centripetal = np.cross(omega, np.cross(omega, r))
+        tangential = np.cross(alpha, r)
+        z_hat = centripetal + tangential
+        y = (a2 - a1) - z_hat
+        if not np.all(np.isfinite(y)):
+            return False, 0.0, 0.0, 0.0
+
+        H_bg = -(self._skew(omega) @ self._skew(r) + self._skew(np.cross(omega, r)))
+        H = np.zeros((3, 15), dtype=np.float64)
+        H[:, 9:12] = H_bg
+
+        if R_laid is None:
+            R = np.eye(3, dtype=np.float64) * LAID_DIFF_R_DIAG
+        else:
+            R = np.asarray(R_laid, dtype=np.float64)
+
+        S = H @ self.P @ H.T + R
+        S_inv = np.linalg.inv(S)
+        mahal_sq = float(y @ S_inv @ y)
+        if mahal_sq > gate_threshold ** 2:
+            return False, mahal_sq, float(np.linalg.norm(y)), 0.0
+
+        K = self.P @ H.T @ S_inv
+        # Quarantine to gyro bias states only
+        K[0:9, :] = 0.0
+        K[12:15, :] = 0.0
+
+        dx = K @ y
+        dx[9:12] = np.clip(dx[9:12], -0.02, 0.02)
+        bg_before = self.bg.copy()
+        self.bg += dx[9:12]
+
+        # Joseph form
+        I = np.eye(15)
+        IKH = I - K @ H
+        self.P = IKH @ self.P @ IKH.T + K @ R @ K.T
+        self.P = 0.5 * (self.P + self.P.T)
+        return True, mahal_sq, float(np.linalg.norm(y)), float(np.linalg.norm(self.bg - bg_before))
 
 # Data Pipeline
 def accumulate(existing: dict | None, new: dict) -> dict:
@@ -447,6 +515,9 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
     cau_fire_count = 0
     yaw_anchor_fire_count = 0
     safety_reject_count = 0
+    laid_diff_attempt_count = 0
+    laid_diff_update_count = 0
+    laid_diff_reject_count = 0
 
     # --- Diagnostic Lens Buffers ---
     # Lens 1: Scale Collapse
@@ -467,6 +538,9 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
     diag_innov_norm   = []
     diag_pred_speed   = []
     diag_gt_speed     = []
+    diag_laid_diff_res_norm = []
+    diag_laid_diff_mahal_sq = []
+    diag_bg_dx_norm = []
 
     for step in range(len(df)):
         a, g = accel[step], gyro[step]
@@ -527,9 +601,39 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
             win2       = np.concatenate([win2_accel, win2_gyro], axis=-1)
             win1       = np.concatenate([win_accel_corrected, win_gyro], axis=-1)
             laid_veto, laid_rms = laid_bouncer.check(win1, win2)
+
+            laid_diff_applied = False
+            laid_diff_mahal_sq = None
+            laid_diff_res_norm = None
+            bg_before_laid = eskf_talos.bg.copy()
+            omega_meas = np.mean(win_gyro, axis=0).astype(np.float64)
+            omega_mag = float(np.linalg.norm(omega_meas))
+
+            if ENABLE_LAID_DIFF_UPDATE and omega_mag >= LAID_DIFF_MIN_OMEGA_MAG and (not laid_veto):
+                laid_diff_attempt_count += 1
+                alpha_meas = np.mean(np.gradient(win_gyro, dt, axis=0), axis=0).astype(np.float64)
+                a1_mean = np.mean(win_accel_corrected, axis=0).astype(np.float64)
+                a2_mean = np.mean(win2_accel, axis=0).astype(np.float64)
+                laid_diff_applied, laid_diff_mahal_sq, laid_diff_res_norm, _ = eskf_talos.update_laid_differential(
+                    a1_mean,
+                    omega_meas,
+                    a2_mean,
+                    alpha_meas,
+                    laid_bouncer.r,
+                    R_laid=np.eye(3) * LAID_DIFF_R_DIAG,
+                    gate_threshold=LAID_DIFF_GATE_THRESHOLD,
+                    min_omega_mag=LAID_DIFF_MIN_OMEGA_MAG,
+                )
+                if laid_diff_applied:
+                    laid_diff_update_count += 1
+                else:
+                    laid_diff_reject_count += 1
+
             if not laid_veto:
                 # Optional conservative dynamic yaw anchor (LAID-based)
                 yaw_anchor_applied = False
+                omega_yaw = 0.0
+                yaw_trust = 0.0
                 if ENABLE_YAW_ANCHOR and (not YAW_ANCHOR_HARD_LOCK):
                     omega_yaw, yaw_trust, omega_mag = laid_bouncer.yaw_anchor(win1, win2)
                     current_mean_gyro_z = float(np.mean(win_gyro[:, 2]))
@@ -609,6 +713,11 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                 diag_innov_norm.append(innovation_norm)
                 diag_pred_speed.append(float(np.linalg.norm(pred_v_local)))
                 diag_gt_speed.append(float(np.linalg.norm(gt_v_local)))
+                if laid_diff_res_norm is not None:
+                    diag_laid_diff_res_norm.append(laid_diff_res_norm)
+                if laid_diff_mahal_sq is not None and np.isfinite(laid_diff_mahal_sq):
+                    diag_laid_diff_mahal_sq.append(float(laid_diff_mahal_sq))
+                diag_bg_dx_norm.append(float(np.linalg.norm(eskf_talos.bg - bg_before_laid)))
 
                 diag_update_rows.append({
                     'step_idx': step,
@@ -620,6 +729,10 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                     'innovation_norm': float(innovation_norm),
                     'pred_world_speed_mps': float(pred_world_speed),
                     'safety_reject': bool((pred_world_speed > MAX_PRED_WORLD_SPEED_MPS) or (innovation_norm > MAX_INNOVATION_NORM_MPS)),
+                    'laid_diff_applied': bool(laid_diff_applied),
+                    'laid_diff_mahal_sq': float(laid_diff_mahal_sq) if laid_diff_mahal_sq is not None else None,
+                    'laid_diff_res_norm': float(laid_diff_res_norm) if laid_diff_res_norm is not None else None,
+                    'bg_delta_norm': float(np.linalg.norm(eskf_talos.bg - bg_before_laid)),
                     'gt_speed_mps': float(np.linalg.norm(gt_v_local)),
                     'pred_vx': float(pred_v_local[0]),
                     'pred_vy': float(pred_v_local[1]),
@@ -640,9 +753,9 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                     'abs_err_y': float(current_err[1]),
                     'abs_err_z': float(current_err[2]),
                     'yaw_anchor_applied': bool(yaw_anchor_applied),
-                    'omega_yaw_obs': float(omega_yaw) if ENABLE_YAW_ANCHOR else None,
-                    'yaw_trust': float(yaw_trust) if ENABLE_YAW_ANCHOR else None,
-                    'omega_mag': float(omega_mag) if ENABLE_YAW_ANCHOR else None,
+                    'omega_yaw_obs': float(omega_yaw) if (ENABLE_YAW_ANCHOR and (not YAW_ANCHOR_HARD_LOCK)) else None,
+                    'yaw_trust': float(yaw_trust) if (ENABLE_YAW_ANCHOR and (not YAW_ANCHOR_HARD_LOCK)) else None,
+                    'omega_mag': float(omega_mag) if (ENABLE_YAW_ANCHOR and (not YAW_ANCHOR_HARD_LOCK)) else None,
                 })
             else:
                 laid_veto_count += 1
@@ -656,6 +769,10 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                     'innovation_norm': None,
                     'pred_world_speed_mps': None,
                     'safety_reject': False,
+                    'laid_diff_applied': bool(laid_diff_applied),
+                    'laid_diff_mahal_sq': float(laid_diff_mahal_sq) if laid_diff_mahal_sq is not None else None,
+                    'laid_diff_res_norm': float(laid_diff_res_norm) if laid_diff_res_norm is not None else None,
+                    'bg_delta_norm': float(np.linalg.norm(eskf_talos.bg - bg_before_laid)),
                     'gt_speed_mps': None,
                     'pred_vx': float(pred_vel_local[0]),
                     'pred_vy': float(pred_vel_local[1]),
@@ -867,6 +984,10 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
         'yaw_anchor_hard_lock': bool(YAW_ANCHOR_HARD_LOCK),
         'yaw_anchor_fire_count': int(yaw_anchor_fire_count),
         'safety_reject_count': int(safety_reject_count),
+        'laid_diff_updates': int(laid_diff_update_count),
+        'laid_diff_reject_rate_pct': float((laid_diff_reject_count / max(laid_diff_attempt_count, 1)) * 100.0),
+        'laid_diff_residual_p95': _p95_finite(diag_laid_diff_res_norm),
+        'bg_update_norm_p95': _p95_finite(diag_bg_dx_norm),
         'yaw_err_mean_deg': float(np.mean(diag_yaw_err_deg)) if len(diag_yaw_err_deg) > 0 else 0.0,
         'yaw_err_p95_deg': float(np.percentile(diag_yaw_err_deg, 95)) if len(diag_yaw_err_deg) > 0 else 0.0,
         'yaw_err_max_deg': float(np.max(diag_yaw_err_deg)) if len(diag_yaw_err_deg) > 0 else 0.0,
