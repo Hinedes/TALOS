@@ -43,7 +43,7 @@ from nymeria_loader import (load_sequence, load_sequence_cached, load_imu_stream
 from telemetry import append_eval_csv, generate_diagnostic_dashboard
 
 # Configuration
-PATIENCE               = 15      # ESKF ATE strikes before halting (physical overfitting)
+PATIENCE               = 30      # ESKF ATE strikes before halting (physical overfitting)
 LOSS_PATIENCE          = 10     # Loss stagnation strikes before halting (dead model)
 LOSS_MIN_DELTA         = 1e-5   # Minimum loss improvement to count as progress
 WARMUP_LOSS_THRESHOLD  = 1.0    # Don't run ESKF eval until loss drops below this
@@ -908,6 +908,7 @@ def main():
     parser.add_argument('--manifest', default='Nymeria_download_urls.json')
     parser.add_argument('--root',     default='/mnt/c/TALOS/nymeria')
     parser.add_argument('--golden',   default='/mnt/c/TALOS/golden')
+    parser.add_argument('--seed',     type=int, default=1337)
     args = parser.parse_args()
 
     root, golden = Path(args.root), Path(args.golden)
@@ -916,12 +917,19 @@ def main():
     run_dir = golden / datetime.now().strftime("run_%Y%m%d_%H%M%S")
     run_dir.mkdir(parents=True, exist_ok=True)
     print(f":: Run directory: {run_dir.name}")
+    print(f":: Seed: {args.seed}")
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     with open(args.manifest) as f:
         manifest = json.load(f)['sequences']
 
     import random
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+
     train_seqs = [(sid, e) for sid, e in manifest.items() if VAL_SUBJECT not in sid]
     def _on_disk(item):
         sid, e = item
@@ -935,6 +943,13 @@ def main():
     random.shuffle(on_disk)
     train_seqs = on_disk + off_disk
     val_seqs   = [(sid, e) for sid, e in manifest.items() if VAL_SUBJECT in sid]
+
+    order_path = run_dir / 'train_sequence_order.txt'
+    with open(order_path, 'w', encoding='utf-8') as f:
+        f.write(f"seed={args.seed}\n")
+        for idx, (sid, _) in enumerate(train_seqs, start=1):
+            f.write(f"{idx}\t{sid}\n")
+    print(f":: Sequence order logged: {order_path.name}")
 
     print(f"\n:: Pre-loading ESKF Validation Baseline ({VAL_SUBJECT}) ::")
     val_sid, val_entry = val_seqs[0]
