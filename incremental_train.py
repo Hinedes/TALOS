@@ -107,6 +107,8 @@ class ESKF:
         self.velocity    = np.zeros(3)
         self.orientation = np.eye(3)
         self.bg = np.zeros(3)
+        self.gyro_bias = self.bg
+        self.gyro_meas = np.zeros(3)
         self.ba = np.zeros(3)
         self.P  = np.eye(15) * 0.1
         self.Q  = np.diag([1e-6]*3 + [1e-4]*3 + [1e-5]*3 + [1e-3]*3 + [1e-2]*3)
@@ -118,6 +120,7 @@ class ESKF:
                          [-v[1],  v[0],  0   ]])
 
     def predict(self, accel, gyro):
+        self.gyro_meas = np.asarray(gyro, dtype=np.float64)
         dt, R = self.dt, self.orientation
         u_a = accel - self.ba
         u_g = gyro  - self.bg
@@ -312,6 +315,61 @@ class ESKF:
         self.P = 0.5 * (self.P + self.P.T)
 
         return True, float(np.linalg.norm(self.bg - bg_before))
+
+    def update_centripetal_bias(self, delta_a_y_meas: float, R_cent: float = 0.01) -> tuple[bool, float]:
+        """Dual-IMU centripetal bias correction.
+
+        Measurement:
+            delta_a_y = a1_y - a2_y = -(omega_x^2 + omega_z^2) * d
+        Corrects gyro bias x/z only.
+        """
+        LEVER_ARM = 0.129
+        OMEGA_GATE = 0.5
+
+        # Current best estimate of true angular rate (gyro minus bias)
+        omega_hat = self.gyro_meas - self.gyro_bias
+
+        # Gate on angular rate magnitude
+        if np.linalg.norm(omega_hat) < OMEGA_GATE:
+            return False, 0.0
+
+        # Predicted measurement
+        h = -(omega_hat[0] ** 2 + omega_hat[2] ** 2) * LEVER_ARM
+
+        # Residual
+        y = float(delta_a_y_meas - h)
+
+        # Jacobian into gyro-bias x and z for this state layout [9:12]
+        H = np.zeros((1, 15))
+        H[0, 9] = 2 * LEVER_ARM * omega_hat[0]
+        H[0, 11] = 2 * LEVER_ARM * omega_hat[2]
+
+        R = np.array([[R_cent]])
+        S = H @ self.P @ H.T + R
+        S_inv = np.linalg.inv(S)
+
+        mahal_sq = float(y * S_inv[0, 0] * y)
+        if mahal_sq > SLAP_THRESHOLD ** 2:
+            return False, mahal_sq
+
+        K = self.P @ H.T @ S_inv
+
+        # Only bias states should move
+        K_clean = np.zeros_like(K)
+        K_clean[9] = K[9]
+        K_clean[11] = K[11]
+
+        dx = K_clean @ np.array([y])
+        self.gyro_bias[0] += dx[9, 0]
+        self.gyro_bias[2] += dx[11, 0]
+
+        # Joseph form covariance update
+        I = np.eye(15)
+        IKH = I - K_clean @ H
+        self.P = IKH @ self.P @ IKH.T + K_clean @ R @ K_clean.T
+        self.P = 0.5 * (self.P + self.P.T)
+
+        return True, mahal_sq
 
     def update_yaw_anchor(self, omega_yaw_obs, gyro_z_raw, trust):
         """LAID yaw rate pseudo-measurement targeting gyro bias Z (index 11).
@@ -596,6 +654,7 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
     laid_diff_update_count = 0
     laid_diff_reject_count = 0
     laid_windowed_update_count = 0
+    cent_accepted_count = 0
 
     # --- Diagnostic Lens Buffers ---
     # Lens 1: Scale Collapse
@@ -633,6 +692,11 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
         # LAID fast loop gate (TALOS only): veto physically impossible samples
         eskf_talos.predict(a, g)  # fast loop ungated -- check_sample fires on footstrikes
         eskf_pure.predict(a, g)  # Pure IMU stays ungated for honest comparison
+
+        delta_a_y = float(a[1] - a2_sample[1])
+        cent_applied, _cent_mahal_sq = eskf_talos.update_centripetal_bias(delta_a_y)
+        if cent_applied:
+            cent_accepted_count += 1
 
         # 100Hz tightly-coupled LAID differential update (alpha-immune scalar projection)
         if ENABLE_LAID_DIFF_UPDATE:
@@ -1107,6 +1171,8 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
         'yaw_anchor_min_trust': float(YAW_ANCHOR_MIN_TRUST),
         'yaw_anchor_max_omega_mag': float(YAW_ANCHOR_MAX_OMEGA_MAG),
         'yaw_anchor_max_laid_rms': float(YAW_ANCHOR_MAX_LAID_RMS),
+        'gyro_bias_z': float(eskf_talos.gyro_bias[2]),
+        'cent_bias_updates': int(cent_accepted_count),
     }
     evaluate_eskf._last_summary = summary_row
     csv_path = append_eval_csv(plot_dir, round_idx, summary_row, diag_step_rows, diag_update_rows)
