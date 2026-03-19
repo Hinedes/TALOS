@@ -172,6 +172,49 @@ class ESKF:
         self.P = (np.eye(15) - K @ H) @ self.P
         return True, mahal_sq
 
+    def update_local_velocity(self, v_local_meas, R_obs, slap_threshold=5.0):
+        """Tightly coupled local velocity fusion with surgical NHC yaw projection."""
+        if not np.all(np.isfinite(v_local_meas)): return False, 0.0
+
+        v_local_pred = self.orientation.T @ self.velocity
+        y = v_local_meas - v_local_pred
+
+        H = np.zeros((3, 15))
+        H[0:3, 3:6] = self.orientation.T
+        H[0:3, 6:9] = self._skew(v_local_pred)
+
+        S = H @ self.P @ H.T + R_obs
+        S_inv = np.linalg.inv(S)
+
+        mahal_sq = float(y @ S_inv @ y)
+        R_inv = np.linalg.inv(R_obs)
+        mahal_r_sq = float(y @ R_inv @ y)
+        mahal_max = max(mahal_sq, mahal_r_sq)
+
+        if mahal_max > slap_threshold ** 2:
+            return False, mahal_max
+
+        K = self.P @ H.T @ S_inv
+        K[9:15, :] = 0.0
+
+        dx = K @ y
+
+        # Surgical NHC projection -- yaw axis only, destroy pitch/roll components
+        world_z_local = self.orientation.T @ np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        yaw_correction_mag = np.dot(dx[6:9], world_z_local)
+        dx[6:9] = yaw_correction_mag * world_z_local * 0.15
+
+        self.position += dx[0:3]
+        self.velocity += dx[3:6]
+        self.orientation = self.orientation @ Rotation.from_rotvec(dx[6:9]).as_matrix()
+
+        I = np.eye(15)
+        IKH = I - K @ H
+        self.P = IKH @ self.P @ IKH.T + K @ R_obs @ K.T
+        self.P = 0.5 * (self.P + self.P.T)
+
+        return True, mahal_max
+
     def update_zaru(self, gyro_raw):
         H = np.zeros((3, 15))
         H[0:3, 9:12] = -np.eye(3)
@@ -817,8 +860,6 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                     if laid_w_applied:
                         laid_windowed_update_count += 1
 
-                # Direct rotation from local velocity to world velocity
-                v_world = eskf_talos.orientation @ pred_vel_local
                 pred_var = np.exp(pred_cov_np)
                 r_obs_diag = np.clip(pred_var, R_OBS_MIN_DIAG, R_OBS_MAX_DIAG)
                 if USE_DYNAMIC_R_OBS:
@@ -826,7 +867,17 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                 else:
                     R_obs_used = np.eye(3) * R_OBS_FIXED_DIAG
                     r_obs_diag = np.array([R_OBS_FIXED_DIAG] * 3, dtype=np.float64)
+
                 neural_updates += 1
+
+                accepted, mahal_sq = eskf_talos.update_local_velocity(
+                    pred_vel_local,
+                    R_obs=R_obs_used,
+                    slap_threshold=SLAP_THRESHOLD,
+                )
+
+                # Telemetry only -- not fed to filter
+                v_world = eskf_talos.orientation @ pred_vel_local
                 residual_pre = v_world - eskf_talos.velocity
                 innovation_norm = float(np.linalg.norm(residual_pre))
                 pred_world_speed = float(np.linalg.norm(v_world))
@@ -835,15 +886,7 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
 
                 # Hard safety gate before Kalman update to prevent catastrophic injections
                 if (pred_world_speed > MAX_PRED_WORLD_SPEED_MPS) or (innovation_norm > MAX_INNOVATION_NORM_MPS):
-                    accepted = False
-                    mahal_sq = float('inf')
                     safety_reject_count += 1
-                else:
-                    accepted, mahal_sq = eskf_talos.update_velocity(
-                        v_world,
-                        R_obs=R_obs_used,
-                        slap_threshold=SLAP_THRESHOLD,
-                    )
                 if accepted is False:
                     slap_count += 1
                     
