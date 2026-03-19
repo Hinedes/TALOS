@@ -360,8 +360,8 @@ class ESKF:
         K_clean[11] = K[11]
 
         dx = K_clean @ np.array([y])
-        self.gyro_bias[0] += dx[9, 0]
-        self.gyro_bias[2] += dx[11, 0]
+        self.gyro_bias[0] += dx[9]
+        self.gyro_bias[2] += dx[11]
 
         # Joseph form covariance update
         I = np.eye(15)
