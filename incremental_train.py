@@ -78,8 +78,8 @@ MAX_INNOVATION_NORM_MPS  = 999.0
 CAT_ATE_ABS_M            = 100.0
 CAT_ATE_BEST_MULT        = 8.0
 CAT_STRIKE_LIMIT         = 10
-SOFT_ATE_BEST_MULT       = 1.35
-SOFT_CAGE_CLAMP_PCT      = 45.0
+SOFT_ATE_BEST_MULT       = 3.0
+SOFT_CAGE_CLAMP_PCT      = 85.0
 
 # Yaw-drift intervention (evaluation-time, conservative)
 ENABLE_YAW_ANCHOR        = False
