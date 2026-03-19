@@ -694,7 +694,8 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
         eskf_pure.predict(a, g)  # Pure IMU stays ungated for honest comparison
 
         delta_a_y = float(a[1] - a2_sample[1])
-        cent_applied, _cent_mahal_sq = eskf_talos.update_centripetal_bias(delta_a_y)
+        cent_applied = False
+        # cent_applied, _cent_mahal_sq = eskf_talos.update_centripetal_bias(delta_a_y)
         if cent_applied:
             cent_accepted_count += 1
 
