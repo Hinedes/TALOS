@@ -1441,7 +1441,7 @@ def main():
             best_ckpt = run_dir / 'talos_best_physical.pth'
             if best_ckpt.exists():
                 model.load_state_dict(torch.load(best_ckpt, map_location=device, weights_only=False))
-                opt.state = {}
+                opt.state.clear()
                 torch.save(model.state_dict(), golden / 'talos.pth')
                 print("   [Rollback] Restored last best physical checkpoint")
             else:
@@ -1479,7 +1479,7 @@ def main():
             best_ckpt = run_dir / 'talos_best_physical.pth'
             if best_ckpt.exists():
                 model.load_state_dict(torch.load(best_ckpt, map_location=device, weights_only=False))
-                opt.state = {}
+                opt.state.clear()
                 torch.save(model.state_dict(), golden / 'talos.pth')
                 print("   [Rollback] Restored last best physical checkpoint")
 
