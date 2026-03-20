@@ -615,8 +615,8 @@ def train_round(model, opt, sched, train_data, val_data, device, epochs, checkpo
         lambda_dir = 0.05
         lambda_mag = 1.0
         
-        total_loss = nll + lambda_dir * loss_dir + lambda_mag * loss_mag
-        return torch.mean(weight * total_loss)
+        scale_loss = nll + lambda_dir * loss_dir
+        return torch.mean(weight * scale_loss) + lambda_mag * loss_mag
 
     for epoch in range(epochs):
         model.train()
