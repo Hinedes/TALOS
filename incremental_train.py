@@ -196,8 +196,8 @@ class ESKF:
             return False, mahal_max
 
         K = self.P @ H.T @ S_inv
-        K[9:12, :] = 0.0   # accel bias quarantined -- speed ratio still 0.28, premature update destroys propagation
-        # gyro bias [12:15] NOT quarantined -- observable via cross-covariance, needed for heading correction
+        K[12:15, :] = 0.0   # accel bias quarantined -- speed ratio still 0.28, premature update destroys propagation
+        # gyro bias [9:12] NOT quarantined -- observable via cross-covariance, needed for heading correction
 
         dx = K @ y
 
@@ -209,7 +209,7 @@ class ESKF:
         self.position += dx[0:3]
         self.velocity += dx[3:6]
         self.orientation = self.orientation @ Rotation.from_rotvec(dx[6:9]).as_matrix()
-        self.bg += np.clip(dx[12:15], -1e-4, 1e-4)
+        self.bg += np.clip(dx[9:12], -1e-4, 1e-4)
 
         I = np.eye(15)
         IKH = I - K @ H
