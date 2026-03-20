@@ -209,7 +209,7 @@ class ESKF:
         self.position += dx[0:3]
         self.velocity += dx[3:6]
         self.orientation = self.orientation @ Rotation.from_rotvec(dx[6:9]).as_matrix()
-        self.bg += dx[12:15]
+        self.bg += np.clip(dx[12:15], -1e-4, 1e-4)
 
         I = np.eye(15)
         IKH = I - K @ H
