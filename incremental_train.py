@@ -709,6 +709,7 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
     laid_diff_reject_count = 0
     laid_windowed_update_count = 0
     cent_accepted_count = 0
+    bulwark_fire_count = 0
 
     # --- Diagnostic Lens Buffers ---
     # Lens 1: Scale Collapse
@@ -818,7 +819,9 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
             # The network outputs mean velocity (m/s), NOT displacement.
             pred_vel_local_raw = pred_vel.cpu().numpy()[0]
             pred_vel_local = pred_vel_local_raw * PRED_VEL_GAIN
+            pred_vel_before_bulwark = pred_vel_local.copy()
             pred_vel_local = bulwark(pred_vel_local)
+            bulwark_fire_count += int(not np.array_equal(pred_vel_local, pred_vel_before_bulwark))
             pred_cov_np    = pred_cov.cpu().numpy()[0]
 
             # LAID veto
@@ -1201,6 +1204,8 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
         'cage_clamp_rate_pct': float(cage_clamp_rate),
         'laid_veto_count': int(laid_veto_count),
         'laid_veto_rate_pct': float((laid_veto_count / max(neural_updates + laid_veto_count, 1)) * 100.0),
+        'bulwark_fire_count': int(bulwark_fire_count),
+        'bulwark_fire_rate_pct': float((bulwark_fire_count / max(neural_updates + laid_veto_count, 1)) * 100.0),
         'zaru_fire_count': int(zaru_fire_count),
         'cau_fire_count': int(cau_fire_count),
         'yaw_anchor_enabled': bool(ENABLE_YAW_ANCHOR),

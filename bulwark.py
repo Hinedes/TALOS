@@ -4,7 +4,5 @@ import numpy as np
 _WALL = np.array([0.40, 1.60, 0.50], dtype=np.float32)
 
 def bulwark(pred_delta: np.ndarray) -> np.ndarray:
-    """Zero pred_delta entirely if any axis exceeds hard physical limits."""
-    if np.any(np.abs(pred_delta) > _WALL):
-        return np.zeros(3, dtype=pred_delta.dtype)
-    return pred_delta
+    """Per-axis clip to hard physical limits."""
+    return np.clip(pred_delta, -_WALL, _WALL)
