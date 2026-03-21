@@ -1473,7 +1473,7 @@ def main():
         # Soft quarantine for toxic-but-noncatastrophic rounds
         eval_summary = getattr(evaluate_eskf, '_last_summary', {})
         cage_pct = float(eval_summary.get('cage_clamp_rate_pct', 0.0))
-        soft_limit = best_ate_ever * SOFT_ATE_BEST_MULT if np.isfinite(best_ate_ever) else float('inf')
+        soft_limit = max(best_ate_ever * SOFT_ATE_BEST_MULT, 15.0) if np.isfinite(best_ate_ever) else float('inf')
         if np.isfinite(best_ate_ever) and ((mean_ate > soft_limit) or (cage_pct > SOFT_CAGE_CLAMP_PCT)):
             soft_quarantines += 1
             print(f"\n!! SOFT QUARANTINE: ATE {mean_ate:.3f}m (> {soft_limit:.3f}m) with cage clamp {cage_pct:.1f}%.")
