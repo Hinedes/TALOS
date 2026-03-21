@@ -65,7 +65,7 @@ ZARU_THRESHOLD       = 1e-4
 ZARU_ACCEL_THRESHOLD = 5e-3  # Dual-sensor lock requirement
 
 # Evaluation fusion tuning profile (safe test preset)
-SLAP_THRESHOLD       = 2.0
+SLAP_THRESHOLD       = 3.5
 R_OBS_MIN_DIAG       = 0.05
 R_OBS_MAX_DIAG       = 2.00
 USE_DYNAMIC_R_OBS    = True
