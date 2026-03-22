@@ -642,21 +642,38 @@ def train_round(model, opt, sched, train_data, val_data, device, epochs, checkpo
         pred_norm = pt.norm(dim=-1)
         gt_norm = gt.norm(dim=-1)
         loss_dir = (1.0 - F.cosine_similarity(pt, gt, dim=-1, eps=1e-8)).unsqueeze(-1)
-        loss_mag = F.huber_loss(pred_norm, gt_norm, delta=0.1)
+
+        # Option A: Magnitude Anchoring Loss (Masked & Speed-Weighted)
+        # Mask out near-stationary frames to prevent noisy ratios and division by zero.
+        mask = gt_norm > 0.05
+        if mask.any():
+            speed_ratio = pred_norm[mask] / gt_norm[mask]
+            # Delta 0.15 provides a wider quadratic safe-zone for GT label noise
+            loss_mag_raw = F.huber_loss(speed_ratio, torch.ones_like(speed_ratio), delta=0.15, reduction='none')
+
+            # Create a full-batch magnitude loss tensor
+            loss_mag = torch.zeros_like(gt_norm)
+            loss_mag[mask] = loss_mag_raw
+        else:
+            loss_mag = torch.zeros_like(gt_norm)
         
         # 2. Uncertainty Calibration (Trains ONLY the Covariance Branch)
-        # DETACH pt so NLL cannot pull the velocity predictions toward zero
         mse_detached = (pt.detach() - gt) ** 2
         nll = 0.5 * (pcov + mse_detached / var)
         
-        gt_mag = torch.norm(gt, dim=1, keepdim=True)
-        weight = 1.0 + 10.0 * gt_mag
+        # Global speed-weighting applied to ALL loss terms equally
+        weight = 1.0 + 10.0 * gt_norm.unsqueeze(-1)
         
         lambda_dir = 0.05
-        lambda_mag = 1.0
-        
+        lambda_mag = 1.0 # Effective weight is now matched with NLL via the equation below
+
+        # Sum the dimensional NLL and directional losses
         scale_loss = nll + lambda_dir * loss_dir
-        return torch.mean(weight * scale_loss) + lambda_mag * loss_mag
+
+        # Apply weighting and combine
+        final_loss = torch.mean(weight * scale_loss) + lambda_mag * torch.mean(weight.squeeze(-1) * loss_mag)
+
+        return final_loss
 
     for epoch in range(epochs):
         model.train()
