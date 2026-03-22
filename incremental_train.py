@@ -220,12 +220,13 @@ class ESKF:
         mahal_r_sq = float(y @ R_inv @ y)
         mahal_max = max(mahal_sq, mahal_r_sq)
 
-        recovery_mult = min(1.0 + 0.5 * self._consec_rejects, 4.0)
-        if mahal_max > (slap_threshold * recovery_mult) ** 2:
-            self._consec_rejects += 1
-            self.P[15, 15] = 0.25
-            self._r_vy_decay_steps_left = self._r_vy_decay_steps_total
-            return False, mahal_max
+        # DISABLE SLAP GATE FOR DIAGNOSTICS:
+        # recovery_mult = min(1.0 + 0.5 * self._consec_rejects, 4.0)
+        # if mahal_max > (slap_threshold * recovery_mult) ** 2:
+        #     self._consec_rejects += 1
+        #     self.P[15, 15] = 0.25
+        #     self._r_vy_decay_steps_left = self._r_vy_decay_steps_total
+        #     return False, mahal_max
 
         K = self.P @ H.T @ S_inv
         K[12:15, :] = 0.0   # accel bias quarantined -- speed ratio still 0.28, premature update destroys propagation
