@@ -29,3 +29,4 @@ golden_val.npy
 golden/
 pictures/
 talos_skill/
+.vscode/
