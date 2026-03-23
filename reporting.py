@@ -1,6 +1,4 @@
 import os
-from typing import Iterable
-
 import requests
 
 
@@ -59,6 +57,54 @@ def send_notion(best_ate: float, best_round: int, total_rounds: int) -> bool:
     except Exception as e:
         print(f"[reporting] notion error: {e}")
         return False
+
+
+def publish_attempt_note_then_ntfy(
+    attempt: int,
+    status: str,
+    kept: bool,
+    run_best_ate_m: float | None,
+    best_ate_m: float | None,
+    latest_eskf_ate_m: float | None,
+    slap_rate_pct: float | None,
+    note: str,
+    attempt_log_file: str,
+) -> bool:
+    """Log one EA attempt to Notion, then notify via ntfy about Notion result."""
+    try:
+        from notion_logger import log_attempt
+    except Exception as e:
+        print(f"[reporting] notion import error: {e}")
+        send_ntfy(f"TALOS attempt {attempt}: Notion note failed (import error).")
+        return False
+
+    notion_ok = False
+    try:
+        notion_ok = bool(
+            log_attempt(
+                attempt=attempt,
+                status=status,
+                kept=kept,
+                run_best_ate_m=run_best_ate_m,
+                best_ate_m=best_ate_m,
+                latest_eskf_ate_m=latest_eskf_ate_m,
+                slap_rate_pct=slap_rate_pct,
+                note=note,
+                attempt_log_file=attempt_log_file,
+            )
+        )
+    except Exception as e:
+        print(f"[reporting] notion attempt logging error: {e}")
+        notion_ok = False
+
+    ntfy_msg = (
+        f"TALOS attempt {attempt}: Notion note saved. "
+        f"status={status}, kept={'yes' if kept else 'no'}"
+        if notion_ok
+        else f"TALOS attempt {attempt}: Notion note failed. status={status}"
+    )
+    send_ntfy(ntfy_msg)
+    return notion_ok
 
 
 def publish_training_summary(best_ate: float, best_round: int, total_rounds: int, run_name: str) -> None:

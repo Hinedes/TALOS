@@ -25,7 +25,8 @@ def _t(text, bold=False):
         obj["annotations"] = {"bold": True}
     return obj
 
-def log_run(best_ate: float, best_round: int, total_rounds: int):
+
+def _append_children(children: list[dict]) -> bool:
     token = _load_token()
     if not token:
         print("[notion_logger] NOTION_TOKEN not found -- skipping.")
@@ -36,68 +37,147 @@ def log_run(best_ate: float, best_round: int, total_rounds: int):
         "Notion-Version": "2022-06-28",
         "Content-Type": "application/json",
     }
-
-    body = {
-        "children": [
-            {
-                "object": "block",
-                "type": "heading_2",
-                "heading_2": {"rich_text": [
-                    _t(f"{date.today()} \u2014 Training Run")
-                ]}
-            },
-            {
-                "object": "block",
-                "type": "callout",
-                "callout": {
-                    "rich_text": [
-                        _t("Best ATE: ", bold=True),
-                        _t(f"{best_ate:.3f}m", bold=True),
-                        _t(f"  \u2014  achieved at Round {best_round} of {total_rounds}"),
-                    ],
-                    "icon": {"type": "emoji", "emoji": "🎯"},
-                    "color": "blue_background"
-                }
-            },
-            {
-                "object": "block",
-                "type": "bulleted_list_item",
-                "bulleted_list_item": {"rich_text": [
-                    _t("Val sequence: ", bold=True), _t("shelby_arroyo (300s walking window)")
-                ]}
-            },
-            {
-                "object": "block",
-                "type": "bulleted_list_item",
-                "bulleted_list_item": {"rich_text": [
-                    _t("Checkpoint: ", bold=True), _t("golden/talos_best_physical.pth")
-                ]}
-            },
-            {
-                "object": "block",
-                "type": "bulleted_list_item",
-                "bulleted_list_item": {"rich_text": [
-                    _t("Training rounds completed: ", bold=True), _t(str(total_rounds))
-                ]}
-            },
-            {
-                "object": "block",
-                "type": "divider",
-                "divider": {}
-            }
-        ]
-    }
+    body = {"children": children}
 
     r = requests.patch(
         f"https://api.notion.com/v1/blocks/{RESEARCH_LOG_ID}/children",
-        headers=headers, json=body, timeout=10
+        headers=headers,
+        json=body,
+        timeout=10,
     )
     if r.status_code == 200:
+        return True
+    print(f"[notion_logger] Failed: {r.status_code} {r.text}")
+    return False
+
+def log_run(best_ate: float, best_round: int, total_rounds: int):
+    children = [
+        {
+            "object": "block",
+            "type": "heading_2",
+            "heading_2": {"rich_text": [_t(f"{date.today()} \u2014 Training Run")]},
+        },
+        {
+            "object": "block",
+            "type": "callout",
+            "callout": {
+                "rich_text": [
+                    _t("Best ATE: ", bold=True),
+                    _t(f"{best_ate:.3f}m", bold=True),
+                    _t(f"  \u2014  achieved at Round {best_round} of {total_rounds}"),
+                ],
+                "icon": {"type": "emoji", "emoji": "🎯"},
+                "color": "blue_background",
+            },
+        },
+        {
+            "object": "block",
+            "type": "bulleted_list_item",
+            "bulleted_list_item": {
+                "rich_text": [_t("Val sequence: ", bold=True), _t("shelby_arroyo (300s walking window)")]
+            },
+        },
+        {
+            "object": "block",
+            "type": "bulleted_list_item",
+            "bulleted_list_item": {
+                "rich_text": [_t("Checkpoint: ", bold=True), _t("golden/talos_best_physical.pth")]
+            },
+        },
+        {
+            "object": "block",
+            "type": "bulleted_list_item",
+            "bulleted_list_item": {
+                "rich_text": [_t("Training rounds completed: ", bold=True), _t(str(total_rounds))]
+            },
+        },
+        {"object": "block", "type": "divider", "divider": {}},
+    ]
+
+    if _append_children(children):
         print("[notion_logger] Research Log updated.")
         return True
-    else:
-        print(f"[notion_logger] Failed: {r.status_code} {r.text}")
-        return False
+    return False
+
+
+def log_attempt(
+    attempt: int,
+    status: str,
+    kept: bool,
+    run_best_ate_m: float | None,
+    best_ate_m: float | None,
+    latest_eskf_ate_m: float | None,
+    slap_rate_pct: float | None,
+    note: str,
+    attempt_log_file: str,
+) -> bool:
+    safe_note = (note or "").strip() or "(no note)"
+    children = [
+        {
+            "object": "block",
+            "type": "heading_3",
+            "heading_3": {"rich_text": [_t(f"{date.today()} \u2014 EA Attempt {attempt}")]},
+        },
+        {
+            "object": "block",
+            "type": "callout",
+            "callout": {
+                "rich_text": [
+                    _t("Status: ", bold=True),
+                    _t(status.upper(), bold=True),
+                    _t("  |  "),
+                    _t("Kept: ", bold=True),
+                    _t("yes" if kept else "no"),
+                ],
+                "icon": {"type": "emoji", "emoji": "🧪"},
+                "color": "gray_background",
+            },
+        },
+        {
+            "object": "block",
+            "type": "bulleted_list_item",
+            "bulleted_list_item": {
+                "rich_text": [_t("Run best ATE: ", bold=True), _t("N/A" if run_best_ate_m is None else f"{run_best_ate_m:.3f}m")]
+            },
+        },
+        {
+            "object": "block",
+            "type": "bulleted_list_item",
+            "bulleted_list_item": {
+                "rich_text": [_t("Global best ATE: ", bold=True), _t("N/A" if best_ate_m is None else f"{best_ate_m:.3f}m")]
+            },
+        },
+        {
+            "object": "block",
+            "type": "bulleted_list_item",
+            "bulleted_list_item": {
+                "rich_text": [_t("Latest ESKF ATE: ", bold=True), _t("N/A" if latest_eskf_ate_m is None else f"{latest_eskf_ate_m:.3f}m")]
+            },
+        },
+        {
+            "object": "block",
+            "type": "bulleted_list_item",
+            "bulleted_list_item": {
+                "rich_text": [_t("Slap rate: ", bold=True), _t("N/A" if slap_rate_pct is None else f"{slap_rate_pct:.2f}%")]
+            },
+        },
+        {
+            "object": "block",
+            "type": "bulleted_list_item",
+            "bulleted_list_item": {"rich_text": [_t("Note: ", bold=True), _t(safe_note)]},
+        },
+        {
+            "object": "block",
+            "type": "bulleted_list_item",
+            "bulleted_list_item": {"rich_text": [_t("Attempt log: ", bold=True), _t(attempt_log_file)]},
+        },
+        {"object": "block", "type": "divider", "divider": {}},
+    ]
+
+    ok = _append_children(children)
+    if ok:
+        print(f"[notion_logger] Attempt {attempt} logged.")
+    return ok
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

@@ -3,6 +3,7 @@ import json
 import re
 from pathlib import Path
 from smolagents import CodeAgent, OpenAIModel, tool
+from reporting import publish_attempt_note_then_ntfy
 
 # 1. Define the single strict boundary (detect WSL vs Windows)
 def _get_base_dir() -> Path:
@@ -324,6 +325,18 @@ def run_scored_experiment(note: str = "") -> str:
         note=note,
     )
 
+    notion_logged = publish_attempt_note_then_ntfy(
+        attempt=attempt,
+        status=status,
+        kept=keep,
+        run_best_ate_m=best_ate_m,
+        best_ate_m=_SESSION.get("best_ate_m"),
+        latest_eskf_ate_m=parsed.get("latest_eskf_ate_m"),
+        slap_rate_pct=slap_rate_pct,
+        note=note,
+        attempt_log_file=str(attempt_log_path),
+    )
+
     return json.dumps(
         {
             "attempt": attempt,
@@ -336,6 +349,7 @@ def run_scored_experiment(note: str = "") -> str:
             "training_crashed": crashed,
             "results_file": str(RESULTS_FILE),
             "attempt_log_file": str(attempt_log_path),
+            "notion_logged": notion_logged,
         },
         ensure_ascii=True,
     )
