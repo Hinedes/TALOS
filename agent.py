@@ -39,12 +39,19 @@ def _get_llama_api_base() -> str:
         return explicit_base
 
     if _is_wsl():
-        # In WSL, the first nameserver in /etc/resolv.conf is usually the Windows host.
+        # In WSL, the default route gateway is the Windows host.
         try:
-            with open('/etc/resolv.conf', 'r', encoding='utf-8') as f:
+            with open('/proc/net/route', 'r', encoding='utf-8') as f:
+                next(f, None)
                 for line in f:
-                    if line.startswith('nameserver '):
-                        windows_host_ip = line.split()[1].strip()
+                    fields = line.split()
+                    if len(fields) >= 3 and fields[1] == '00000000':
+                        gateway_hex = fields[2]
+                        octets = [
+                            str(int(gateway_hex[i:i + 2], 16))
+                            for i in range(0, 8, 2)
+                        ]
+                        windows_host_ip = '.'.join(reversed(octets))
                         return f"http://{windows_host_ip}:8080/v1"
         except Exception:
             pass
