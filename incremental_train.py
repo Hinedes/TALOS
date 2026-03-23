@@ -16,6 +16,7 @@ Each round:
 from bulwark import bulwark
 import argparse
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -34,6 +35,11 @@ from torch.utils.data import DataLoader, TensorDataset
 from projectaria_tools.core import data_provider
 
 from SMLP import BigSpectralMLP as SpectralMLP
+from talos_controller import (
+    SLAP_THRESHOLD, R_OBS_MIN_DIAG, R_OBS_MAX_DIAG,
+    USE_DYNAMIC_R_OBS, R_OBS_FIXED_DIAG, PRED_VEL_GAIN,
+    compute_loss,
+)
 from laid import LAIDBouncer
 from halo import HALOObserver
 from npp import NPPTracker
@@ -63,14 +69,6 @@ ESKF_DT     = 1.0 / TARGET_HZ
 ZARU_WINDOW          = 50
 ZARU_THRESHOLD       = 1e-4
 ZARU_ACCEL_THRESHOLD = 5e-3  # Dual-sensor lock requirement
-
-# Evaluation fusion tuning profile (safe test preset)
-SLAP_THRESHOLD       = 3.5
-R_OBS_MIN_DIAG       = 0.05
-R_OBS_MAX_DIAG       = 2.00
-USE_DYNAMIC_R_OBS    = True
-R_OBS_FIXED_DIAG     = 0.10
-PRED_VEL_GAIN        = 1.00
 
 # Catastrophic divergence safeguards
 MAX_PRED_WORLD_SPEED_MPS = 999.0
@@ -628,49 +626,20 @@ def download_sequence(seq_id: str, entry: dict, root: Path) -> Path | None:
     return seq_path
 
 # Training
-def train_round(model, opt, sched, train_data, val_data, device, epochs, checkpoint_path):
+def train_round(model, opt, sched, train_data, val_data, device, epochs, checkpoint_path, loader_workers=0):
     X_tr, T_tr, Q_tr = make_tensors(train_data, device)
     X_va, T_va, Q_va = make_tensors(val_data,   device)
-    loader = DataLoader(TensorDataset(X_tr, T_tr, Q_tr), batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
+    loader = DataLoader(
+        TensorDataset(X_tr, T_tr, Q_tr),
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        drop_last=True,
+        num_workers=loader_workers,
+        pin_memory=(device.type == 'cuda'),
+        persistent_workers=(loader_workers > 0),
+    )
 
     best_val, t_losses = float('inf'), []
-
-    def loss_fn(pt, pcov, gt):
-        var = torch.exp(pcov)
-
-        # 1. The Translation Head: Robust, High-Weight Loss
-        pred_norm = pt.norm(dim=-1)
-        gt_norm = gt.norm(dim=-1)
-
-        # Direction Loss (Dominant, Scale-Invariant)
-        loss_dir = (1.0 - F.cosine_similarity(pt, gt, dim=-1, eps=1e-8)).unsqueeze(-1)
-
-        # Magnitude Loss (Strong Anchor, Outlier-Robust)
-        mask = gt_norm > 0.05
-        if mask.any():
-            speed_ratio = pred_norm[mask] / gt_norm[mask]
-            loss_mag_raw = F.huber_loss(speed_ratio, torch.ones_like(speed_ratio), delta=0.15, reduction='none')
-            loss_mag = torch.zeros_like(gt_norm)
-            loss_mag[mask] = loss_mag_raw
-        else:
-            loss_mag = torch.zeros_like(gt_norm)
-
-        # 2. The Covariance Head: NLL on Detached Predictions
-        mse_detached = (pt.detach() - gt) ** 2
-        loss_nll = 0.5 * (pcov + mse_detached / var)
-
-        # 3. Independent Weighting Strategy
-        # Speed weighting applies ONLY to the covariance NLL
-        weight = 1.0 + 10.0 * gt_norm.unsqueeze(-1)
-        loss_covariance = torch.mean(weight * loss_nll)
-
-        # Massive lambdas force the translation head to learn kinematics
-        # Unweighted to prevent gradient shock at initialization
-        lambda_dir = 2.0
-        lambda_mag = 1.0
-        loss_velocity = lambda_dir * torch.mean(loss_dir) + lambda_mag * torch.mean(loss_mag)
-
-        return loss_velocity + loss_covariance
 
     for epoch in range(epochs):
         model.train()
@@ -678,7 +647,7 @@ def train_round(model, opt, sched, train_data, val_data, device, epochs, checkpo
         for xb, tb, qb in loader:
             opt.zero_grad()
             pt, pcov = model(xb)
-            loss = loss_fn(pt, pcov, tb)
+            loss = compute_loss(pt, pcov, tb)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             opt.step()
@@ -688,7 +657,7 @@ def train_round(model, opt, sched, train_data, val_data, device, epochs, checkpo
         model.eval()
         with torch.no_grad():
             pvt, pvcov = model(X_va)
-            v_loss = loss_fn(pvt, pvcov, T_va)
+            v_loss = compute_loss(pvt, pvcov, T_va)
 
         sched.step(v_loss.item())
 
@@ -1332,12 +1301,35 @@ def update_master_dashboard(history: list[dict], plot_path: Path):
     plt.close(fig)
 
 # Main
+def configure_cpu_runtime(cpu_threads: int | None, interop_threads: int | None) -> tuple[int, int]:
+    cpu_count = os.cpu_count() or 1
+    reserve = 1 if cpu_count > 2 else 0
+    target_threads = cpu_threads if (cpu_threads is not None and cpu_threads > 0) else max(1, cpu_count - reserve)
+    target_interop = interop_threads if (interop_threads is not None and interop_threads > 0) else max(1, min(4, target_threads // 4))
+
+    torch.set_num_threads(target_threads)
+    try:
+        torch.set_num_interop_threads(target_interop)
+    except RuntimeError:
+        # Interop thread count can only be set once per process; ignore if already initialized.
+        pass
+
+    return target_threads, target_interop
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--manifest', default='Nymeria_download_urls.json')
     parser.add_argument('--root',     default='/mnt/c/TALOS/nymeria')
     parser.add_argument('--golden',   default='/home/iclab/TALOS/golden')
     parser.add_argument('--seed',     type=int, default=1337)
+    parser.add_argument('--device', choices=['cpu', 'cuda', 'auto'], default='auto')
+    parser.add_argument('--cpu-threads', type=int, default=None,
+                        help='Torch compute threads on CPU. Default: all logical cores minus one.')
+    parser.add_argument('--interop-threads', type=int, default=None,
+                        help='Torch inter-op threads. Default: min(4, cpu_threads/4).')
+    parser.add_argument('--loader-workers', type=int, default=0,
+                        help='DataLoader workers for training batches (0 keeps loading on main process).')
     args = parser.parse_args()
 
     root, golden = Path(args.root), Path(args.golden)
@@ -1347,7 +1339,14 @@ def main():
     run_dir.mkdir(parents=True, exist_ok=True)
     print(f":: Run directory: {run_dir.name}")
     print(f":: Seed: {args.seed}")
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    device = torch.device('cpu')
+
+    if device.type == 'cpu':
+        cpu_threads, interop_threads = configure_cpu_runtime(args.cpu_threads, args.interop_threads)
+        print(f":: Device: CPU | torch_threads={cpu_threads} | interop_threads={interop_threads} | loader_workers={args.loader_workers}")
+    else:
+        print(f":: Device: CUDA | loader_workers={args.loader_workers}")
 
     with open(args.manifest) as f:
         manifest = json.load(f)['sequences']
@@ -1381,8 +1380,16 @@ def main():
     print(f":: Sequence order logged: {order_path.name}")
 
     print(f"\n:: Pre-loading ESKF Validation Baseline ({VAL_SUBJECT}) ::")
+    if not val_seqs:
+        print(f"CRITICAL ERROR: No validation sequence found for subject '{VAL_SUBJECT}' in manifest {args.manifest}")
+        return
+
     val_sid, val_entry = val_seqs[0]
     val_seq_path = download_sequence(val_sid, val_entry, root)
+    if val_seq_path is None:
+        print(f"CRITICAL ERROR: Could not download validation sequence {val_sid}")
+        return
+
     import pickle
     _val_cache = Path("/mnt/c/TALOS/golden/cache") / f"{val_seq_path.parent.name}_val_stream.pkl"
     if _val_cache.exists():
@@ -1447,7 +1454,8 @@ def main():
 
         print(f"  [Train] Pool size: {train_data['trans'].shape[0]:,} windows")
         train_final, _ = train_round(model, opt, sched, train_data, val_data, device,
-                                     EPOCHS_PER_ROUND, golden / 'talos.pth')
+                         EPOCHS_PER_ROUND, golden / 'talos.pth',
+                         loader_workers=max(0, args.loader_workers))
 
         if best_loss_ever - train_final > LOSS_MIN_DELTA:
             best_loss_ever       = train_final
