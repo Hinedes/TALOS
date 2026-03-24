@@ -120,33 +120,22 @@ def _rotvec_to_matrix(rotvec):
     return np.eye(3) + np.sin(angle) * K + (1.0 - np.cos(angle)) * (K @ K)
 
 @numba.njit(cache=True, fastmath=True)
-def _eskf_predict_math(dt, position, velocity, orientation, bg, ba, b_vy, P, Q, accel, gyro, gravity,
-                       q_straight, q_sweep, omega_gate, beta):
+def _eskf_predict_math(dt, position, velocity, orientation, bg, ba, P, Q, accel, gyro, gravity):
     u_a = accel - ba
     u_g = gyro - bg
-    omega_z = float(u_g[2])
-    v_horiz_sq = velocity[0]**2 + velocity[1]**2
     
-    if v_horiz_sq < 0.1:
-        q_bvy = q_straight
-    else:
-        q_bvy = q_straight if abs(omega_z) < omega_gate else q_sweep
-        
-    Q[15, 15] = q_bvy * dt
     aw = orientation @ u_a + gravity
     
     pos_new = position + velocity * dt + 0.5 * aw * dt**2
     vel_new = velocity + aw * dt
-    b_vy_new = b_vy * np.exp(-beta * dt)
     
     ori_new = orientation @ _rotvec_to_matrix(u_g * dt)
     
-    F = np.eye(16)
+    F = np.eye(15)
     F[0:3, 3:6]   = np.eye(3) * dt
     F[3:6, 6:9]   = -orientation @ _eskf_skew(u_a) * dt
     F[3:6, 12:15] = -orientation * dt
     F[6:9, 9:12]  = -orientation * dt
-    F[15, 15]     = 1.0 - beta * dt
     
     P_new = F @ P @ F.T + Q
     
@@ -154,7 +143,7 @@ def _eskf_predict_math(dt, position, velocity, orientation, bg, ba, b_vy, P, Q, 
     U, _, Vt = np.linalg.svd(ori_new)
     ori_new = U @ Vt
     
-    return pos_new, vel_new, ori_new, b_vy_new, P_new, Q
+    return pos_new, vel_new, ori_new, P_new, Q
 
 
 class ESKF:
@@ -167,18 +156,11 @@ class ESKF:
         self.bg = np.zeros(3)
         self.gyro_bias = self.bg
         self.gyro_meas = np.zeros(3)
+        self.bg = np.zeros(3)
         self.ba = np.zeros(3)
-        self.b_vy = 0.0
-        self.state_dim = 16
-        self._b_vy_beta = 1.0 / 300.0
-        self._b_vy_q_straight = 1e-8
-        self._b_vy_q_sweep = (0.003 ** 2)
-        self._b_vy_omega_gate = 0.2
-        self._r_vy_decay_steps_total = 50
-        self._r_vy_decay_steps_left = 0
+        self.state_dim = 15
         self.P  = np.eye(self.state_dim) * 0.1
-        self.P[15, 15] = 0.005
-        self.Q  = np.diag([1e-6]*3 + [1e-4]*3 + [1e-5]*3 + [1e-3]*3 + [1e-2]*3 + [self._b_vy_q_straight * self.dt])
+        self.Q  = np.diag([1e-6]*3 + [1e-4]*3 + [1e-5]*3 + [1e-3]*3 + [1e-2]*3)
 
     @staticmethod
     def _skew(v):
@@ -189,16 +171,14 @@ class ESKF:
     def predict(self, accel, gyro):
         self.gyro_meas = np.asarray(gyro, dtype=np.float64)
         
-        pos, vel, ori, b_vy, P, Q = _eskf_predict_math(
+        pos, vel, ori, P, Q = _eskf_predict_math(
             self.dt, self.position, self.velocity, self.orientation, 
-            self.bg, self.ba, self.b_vy, self.P, self.Q, accel, gyro, self.gravity,
-            self._b_vy_q_straight, self._b_vy_q_sweep, self._b_vy_omega_gate, self._b_vy_beta
+            self.bg, self.ba, self.P, self.Q, accel, gyro, self.gravity
         )
         
         self.position = pos
         self.velocity = vel
         self.orientation = ori
-        self.b_vy = b_vy
         self.P = P
         self.Q = Q
 
@@ -239,23 +219,14 @@ class ESKF:
         """Tightly coupled local velocity fusion with surgical NHC yaw projection."""
         if not np.all(np.isfinite(v_local_meas)): return False, 0.0
 
-        if not hasattr(self, '_consec_rejects'):
-            self._consec_rejects = 0
-
         v_local_pred = self.orientation.T @ self.velocity
-        v_local_pred_biased = v_local_pred.copy()
-        v_local_pred_biased[1] += self.b_vy
-        y = v_local_meas - v_local_pred_biased
+        y = v_local_meas - v_local_pred
 
         H = np.zeros((3, self.state_dim))
         H[0:3, 3:6] = self.orientation.T
         H[0:3, 6:9] = self._skew(v_local_pred)
-        H[1, 15] = 1.0
 
-        r_vy_mult = 1.0 + 2.0 * (self._r_vy_decay_steps_left / max(self._r_vy_decay_steps_total, 1))
         R_eff = np.array(R_obs, dtype=np.float64, copy=True)
-        R_eff[1, 1] *= r_vy_mult
-
         S = H @ self.P @ H.T + R_eff
         S_inv = np.linalg.inv(S)
 
@@ -264,11 +235,7 @@ class ESKF:
         mahal_r_sq = float(y @ R_inv @ y)
         mahal_max = max(mahal_sq, mahal_r_sq)
 
-        recovery_mult = min(1.0 + 0.5 * self._consec_rejects, 4.0)
-        if mahal_max > (slap_threshold * recovery_mult) ** 2:
-            self._consec_rejects += 1
-            self.P[15, 15] = 0.25
-            self._r_vy_decay_steps_left = self._r_vy_decay_steps_total
+        if mahal_max > slap_threshold ** 2:
             return False, mahal_max
 
         K = self.P @ H.T @ S_inv
@@ -286,17 +253,13 @@ class ESKF:
         self.velocity += dx[3:6]
         self.orientation = self.orientation @ Rotation.from_rotvec(dx[6:9]).as_matrix()
         self.bg += np.clip(dx[9:12], -1e-4, 1e-4)
-        self.b_vy += float(dx[15])
 
         I = np.eye(self.state_dim)
         IKH = I - K @ H
         self.P = IKH @ self.P @ IKH.T + K @ R_eff @ K.T
         self.P = 0.5 * (self.P + self.P.T)
 
-        if self._r_vy_decay_steps_left > 0:
-            self._r_vy_decay_steps_left -= 1
-
-        self._consec_rejects = 0
+        return True, mahal_sq
 
         return True, mahal_max
 
