@@ -1417,6 +1417,7 @@ def configure_cpu_runtime(cpu_threads: int | None, interop_threads: int | None) 
 
 
 def main():
+    global BATCH_SIZE
     parser = argparse.ArgumentParser()
     parser.add_argument('--manifest', default='Nymeria_download_urls.json')
     parser.add_argument('--root',     default='/mnt/c/TALOS/nymeria')
@@ -1610,10 +1611,13 @@ def main():
         except RuntimeError as e:
             if "out of memory" in str(e).lower():
                 print(f"\n!! CUDA OUT OF MEMORY: {e}")
-                print("   [Overnight Hack] Pool grew too large. Purging memory and continuing!")
+                print(f"   [Overnight Hack] Purging memory, shrinking batch size from {BATCH_SIZE} to {max(512, BATCH_SIZE // 2)}, and continuing!")
                 torch.cuda.empty_cache()
                 subject_pool.clear()
                 train_data = None
+                
+                # Dynamically reduce footprint to chew through heavy manifolds
+                BATCH_SIZE = max(512, BATCH_SIZE // 2)
                 continue
             raise
 
