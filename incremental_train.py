@@ -35,10 +35,6 @@ from torch.utils.data import DataLoader, TensorDataset
 from projectaria_tools.core import data_provider
 
 from SMLP import BigSpectralMLP as SpectralMLP
-from talos_controller import (
-    SLAP_THRESHOLD, R_OBS_MIN_DIAG, R_OBS_MAX_DIAG,
-    USE_DYNAMIC_R_OBS, R_OBS_FIXED_DIAG, PRED_VEL_GAIN,
-)
 from laid import LAIDBouncer
 from halo import HALOObserver
 from npp import NPPTracker
@@ -47,6 +43,14 @@ from nymeria_loader import (load_sequence, load_sequence_cached, load_imu_stream
                             SID_RIGHT, SID_LEFT, TARGET_HZ)
 from telemetry import append_eval_csv, generate_diagnostic_dashboard
 from reporting import publish_training_summary
+
+# ESKF fusion thresholds (incremental_train is the source of truth).
+SLAP_THRESHOLD       = 2.00
+R_OBS_MIN_DIAG       = 0.05
+R_OBS_MAX_DIAG       = 2.00
+USE_DYNAMIC_R_OBS    = False
+R_OBS_FIXED_DIAG     = 0.10
+PRED_VEL_GAIN        = 1.00
 
 # Configuration
 PATIENCE               = 30      # ESKF ATE strikes before halting (physical overfitting)
