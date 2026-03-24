@@ -1,5 +1,5 @@
 import sys
-sys.path.insert(0, '/mnt/c/TALOS')
+sys.path.insert(0, '/home/TALOS')
 import torch
 import numpy as np
 import matplotlib
@@ -8,26 +8,57 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from incremental_train import load_continuous_val_stream, evaluate_eskf, ESKF_DT
 from SMLP import SpectralMLP
+import pickle
 
+
+def find_latest_checkpoint(golden_dir: Path) -> Path:
+    """Find the latest run_YYYYMMDD_HHMMSS folder and return best_physical.pth if it exists."""
+    golden_dir = Path(golden_dir)
+    runs = list(golden_dir.glob("run_*"))
+    if not runs:
+        raise FileNotFoundError(f"No run folders found in {golden_dir}")
+    latest_run = sorted(runs)[-1]
+    ckpt_path = latest_run / "talos_best_physical.pth"
+    if not ckpt_path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+    print(f"[Checkpoint] Found: {latest_run.name}/talos_best_physical.pth")
+    return ckpt_path
+
+
+# Setup paths
+golden_dir = Path('/home/TALOS/golden')
+ckpt_path = find_latest_checkpoint(golden_dir)
+
+# Load model and checkpoint
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model  = SpectralMLP().to(device)
-ckpt   = torch.load('/mnt/c/TALOS/golden/talos_best_physical.pth', map_location=device)
+ckpt   = torch.load(ckpt_path, map_location=device, weights_only=False)
 model.load_state_dict(ckpt, strict=False)
+print(f"[Device] {device}")
 
-val_path = Path('/mnt/c/TALOS/nymeria/Nymeria_v0.0_20230608_s0_shelby_arroyo_act0_3ciwl8_recording_head/recording_head')
-import pickle
-_cache = Path('/mnt/c/TALOS/golden/cache') / f'{val_path.parent.name}_val_stream.pkl'
+# Load validation data
+val_path = Path('/home/TALOS/nymeria').glob('Nymeria_v0.0_*shelby_arroyo*recording_head')
+val_path = next(val_path, None)
+if val_path is None:
+    raise FileNotFoundError("Could not find Shelby Arroyo validation sequence")
+val_path = val_path / 'recording_head'
+print(f"[Data] Using: {val_path}")
+
+cache_dir = golden_dir / "cache"
+cache_dir.mkdir(parents=True, exist_ok=True)
+_cache = cache_dir / f'{val_path.parent.name}_val_stream.pkl'
+
 if _cache.exists():
-    print(f'[cache] HIT val_stream')
+    print(f'[Cache] HIT val_stream')
     df, gravity = pickle.load(open(_cache, 'rb'))
 else:
-    print(f'[cache] MISS -- reading VRS (slow)')
+    print(f'[Cache] MISS -- reading VRS (slow)')
     df, gravity = load_continuous_val_stream(val_path)
 
 MAX_SECONDS = 300
 print(f'Running evaluate_eskf ({MAX_SECONDS}s)...')
 df_walk = df.iloc[313*100:].reset_index(drop=True)
-ate = evaluate_eskf(model, df_walk, gravity, device, 0, Path('/mnt/c/TALOS/golden'), max_seconds=MAX_SECONDS)
+ate = evaluate_eskf(model, df_walk, gravity, device, 0, golden_dir, max_seconds=MAX_SECONDS)
 print(f'ATE ({MAX_SECONDS}s): {ate:.3f}m')
 
 talos_pos = evaluate_eskf._last_talos_pos
@@ -91,6 +122,6 @@ for label, idx in markers.items():
 ax3.legend(facecolor='#1a1a1a', edgecolor='#333333', labelcolor='#dddddd', fontsize=8)
 
 plt.tight_layout()
-out = '/mnt/c/TALOS/golden/shelby_trajectory.png'
+out = golden_dir / 'shelby_trajectory.png'
 plt.savefig(out, dpi=150, bbox_inches='tight', facecolor=BG)
 print(f'Saved to {out}')
