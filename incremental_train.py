@@ -630,14 +630,16 @@ def download_sequence(seq_id: str, entry: dict, root: Path) -> Path | None:
 def train_round(model, opt, sched, train_data, val_data, device, epochs, checkpoint_path, loader_workers=0):
     X_tr, T_tr, Q_tr = make_tensors(train_data, device)
     X_va, T_va, Q_va = make_tensors(val_data,   device)
+    dataset_on_cpu = (X_tr.device.type == 'cpu')
+    effective_workers = loader_workers if dataset_on_cpu else 0
     loader = DataLoader(
         TensorDataset(X_tr, T_tr, Q_tr),
         batch_size=BATCH_SIZE,
         shuffle=True,
         drop_last=True,
-        num_workers=loader_workers,
-        pin_memory=(device.type == 'cuda'),
-        persistent_workers=(loader_workers > 0),
+        num_workers=effective_workers,
+        pin_memory=(device.type == 'cuda' and dataset_on_cpu),
+        persistent_workers=(effective_workers > 0),
     )
 
     best_val, t_losses = float('inf'), []
