@@ -45,7 +45,7 @@ from telemetry import append_eval_csv, generate_diagnostic_dashboard
 from reporting import publish_training_summary
 
 # ESKF fusion thresholds (incremental_train is the source of truth).
-SLAP_THRESHOLD       = 2.00
+SLAP_THRESHOLD       = 4.00
 R_OBS_MIN_DIAG       = 0.05
 R_OBS_MAX_DIAG       = 2.00
 USE_DYNAMIC_R_OBS    = False
