@@ -247,7 +247,7 @@ class ESKF:
         # Surgical NHC projection -- yaw axis only, destroy pitch/roll components
         world_z_local = self.orientation.T @ np.array([0.0, 0.0, 1.0], dtype=np.float64)
         yaw_correction_mag = np.dot(dx[6:9], world_z_local)
-        dx[6:9] = yaw_correction_mag * world_z_local * 0.15
+        dx[6:9] = yaw_correction_mag * world_z_local * 1.0
 
         self.position += dx[0:3]
         self.velocity += dx[3:6]
