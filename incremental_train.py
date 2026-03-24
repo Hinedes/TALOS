@@ -1324,7 +1324,6 @@ def main():
     parser.add_argument('--root',     default='/mnt/c/TALOS/nymeria')
     parser.add_argument('--golden',   default='/home/iclab/TALOS/golden')
     parser.add_argument('--seed',     type=int, default=1337)
-    parser.add_argument('--device', choices=['cpu', 'cuda', 'auto'], default='auto')
     parser.add_argument('--cpu-threads', type=int, default=None,
                         help='Torch compute threads on CPU. Default: all logical cores minus one.')
     parser.add_argument('--interop-threads', type=int, default=None,
@@ -1341,13 +1340,12 @@ def main():
     print(f":: Run directory: {run_dir.name}")
     print(f":: Seed: {args.seed}")
 
-    device = torch.device('cpu')
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA-only mode is enabled, but no CUDA device is available.")
 
-    if device.type == 'cpu':
-        cpu_threads, interop_threads = configure_cpu_runtime(args.cpu_threads, args.interop_threads)
-        print(f":: Device: CPU | torch_threads={cpu_threads} | interop_threads={interop_threads} | loader_workers={args.loader_workers}")
-    else:
-        print(f":: Device: CUDA | loader_workers={args.loader_workers}")
+    device = torch.device('cuda')
+    device_name = torch.cuda.get_device_name(0)
+    print(f":: Device: CUDA ({device_name}) | loader_workers={args.loader_workers}")
 
     with open(args.manifest) as f:
         manifest = json.load(f)['sequences']
