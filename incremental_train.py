@@ -84,7 +84,7 @@ CAT_ATE_BEST_MULT        = 8.0
 CAT_STRIKE_LIMIT         = 10
 SOFT_ATE_BEST_MULT       = 2.0
 SOFT_CAGE_CLAMP_PCT      = 70.0
-CAGE_RADIUS              = 0.50
+CAGE_RADIUS              = 999.0
 
 # Yaw-drift intervention (evaluation-time, conservative)
 ENABLE_YAW_ANCHOR        = False
