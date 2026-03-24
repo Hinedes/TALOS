@@ -673,15 +673,18 @@ def load_continuous_val_stream(seq_root: Path):
     return df, true_gravity
 
 def download_sequence(seq_id: str, entry: dict, root: Path) -> Path | None:
-    # --- EWS: Aggressive Storage Bypass ---
-    # Because of the 900GB drive limit, if the compressed NPZ cache exists, NEVER download the 4GB VRS Zip!
-    cache_path = Path('/mnt/c/TALOS/golden/cache') / f"{seq_id}.npz"
-    if cache_path.exists():
-        # Virtual path - load_sequence_cached intercepts this
-        return root / seq_id / 'recording_head'
-
     target_bundle = entry.get('recording_head')
     if not target_bundle: return None
+
+    filename = target_bundle['filename']
+    zip_stem = Path(filename).stem
+
+    # --- EWS: Aggressive Storage Bypass ---
+    # Because of the 900GB drive limit, if the compressed NPZ cache exists, NEVER download the 4GB VRS Zip!
+    cache_path = Path('/mnt/c/TALOS/golden/cache') / f"{zip_stem}.npz"
+    if cache_path.exists():
+        # Virtual path - load_sequence_cached intercepts this
+        return root / zip_stem / 'recording_head'
 
     filename    = target_bundle['filename']
     zip_path    = root / filename
