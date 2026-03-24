@@ -15,6 +15,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from pathlib import Path
 from datetime import datetime
+import pickle
 
 from incremental_train import load_continuous_val_stream, evaluate_eskf, ESKF_DT
 from SMLP import SpectralMLP
@@ -59,13 +60,26 @@ def run_eval(golden_dir: str, val_seq_path: str, max_seconds: int = 300, output_
     
     # Load validation data
     print(f"[Data] Loading validation sequence: {val_seq_path}")
-    cache_dir = golden_dir / "cache"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    _cache = cache_dir / f"{val_seq_path.parent.name}_val_stream.pkl"
+    
+    # Check for cached val_stream (prioritize /mnt/c/TALOS location)
+    _cache_locations = [
+        Path('/mnt/c/TALOS/golden/cache') / f"{val_seq_path.parent.name}_val_stream.pkl",
+        golden_dir / "cache" / f"{val_seq_path.parent.name}_val_stream.pkl"
+    ]
+    
+    _cache = None
+    for cache_path in _cache_locations:
+        if cache_path.exists():
+            _cache = cache_path
+            break
+    
+    if _cache is None:
+        cache_dir = golden_dir / "cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        _cache = cache_dir / f"{val_seq_path.parent.name}_val_stream.pkl"
     
     if _cache.exists():
-        print(f"[Cache] HIT val_stream")
-        import pickle
+        print(f"[Cache] HIT val_stream from {_cache}")
         df, gravity = pickle.load(open(_cache, 'rb'))
     else:
         print(f"[Cache] MISS -- reading VRS (slow)")
@@ -128,12 +142,22 @@ if __name__ == '__main__':
     if args.golden is None:
         args.golden = Path.home() / 'TALOS' / 'golden'
     
-    # Auto-find Shelby Arroyo validation sequence
+    # Auto-find Shelby Arroyo validation sequence (check both locations)
     if args.val_seq is None:
-        nymeria_path = Path.home() / 'TALOS' / 'nymeria'
-        val_seqs = list(nymeria_path.glob('Nymeria_v0.0_*shelby_arroyo*recording_head'))
+        nymeria_paths = [
+            Path('/mnt/c/TALOS/nymeria'),  # Windows mount (primary)
+            Path.home() / 'TALOS' / 'nymeria'  # WSL native (fallback)
+        ]
+        
+        val_seqs = None
+        for nymeria_root in nymeria_paths:
+            if nymeria_root.exists():
+                val_seqs = list(nymeria_root.glob('Nymeria_v0.0_*shelby_arroyo*recording_head'))
+                if val_seqs:
+                    break
+        
         if not val_seqs:
-            raise FileNotFoundError(f"No Shelby Arroyo sequences found in {nymeria_path}")
+            raise FileNotFoundError(f"No Shelby Arroyo sequences found in: {nymeria_paths}")
         args.val_seq = sorted(val_seqs)[0] / 'recording_head'
     
     ate, rte = run_eval(

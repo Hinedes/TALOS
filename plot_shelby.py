@@ -37,20 +37,44 @@ ckpt   = torch.load(ckpt_path, map_location=device, weights_only=False)
 model.load_state_dict(ckpt, strict=False)
 print(f"[Device] {device}")
 
-# Load validation data
-val_path = (Path.home() / 'TALOS' / 'nymeria').glob('Nymeria_v0.0_*shelby_arroyo*recording_head')
-val_path = next(val_path, None)
+# Load validation data (check both WSL and Windows mount locations)
+nymeria_paths = [
+    Path('/mnt/c/TALOS/nymeria'),  # Windows mount (primary)
+    Path.home() / 'TALOS' / 'nymeria'  # WSL native (fallback)
+]
+
+val_path = None
+for nymeria_root in nymeria_paths:
+    if nymeria_root.exists():
+        candidates = list(nymeria_root.glob('Nymeria_v0.0_*shelby_arroyo*recording_head'))
+        if candidates:
+            val_path = sorted(candidates)[0] / 'recording_head'
+            print(f"[Data] Using: {val_path}")
+            break
+
 if val_path is None:
-    raise FileNotFoundError("Could not find Shelby Arroyo validation sequence")
-val_path = val_path / 'recording_head'
-print(f"[Data] Using: {val_path}")
+    raise FileNotFoundError(f"Could not find Shelby Arroyo validation sequence in: {nymeria_paths}")
 
 cache_dir = golden_dir / "cache"
 cache_dir.mkdir(parents=True, exist_ok=True)
-_cache = cache_dir / f'{val_path.parent.name}_val_stream.pkl'
+
+# Check for cached val_stream (prioritize /mnt/c/TALOS location)
+_cache_locations = [
+    Path('/mnt/c/TALOS/golden/cache') / f'{val_path.parent.name}_val_stream.pkl',
+    cache_dir / f'{val_path.parent.name}_val_stream.pkl'
+]
+
+_cache = None
+for cache_path in _cache_locations:
+    if cache_path.exists():
+        _cache = cache_path
+        break
+
+if _cache is None:
+    _cache = cache_dir / f'{val_path.parent.name}_val_stream.pkl'
 
 if _cache.exists():
-    print(f'[Cache] HIT val_stream')
+    print(f'[Cache] HIT val_stream from {_cache}')
     df, gravity = pickle.load(open(_cache, 'rb'))
 else:
     print(f'[Cache] MISS -- reading VRS (slow)')
