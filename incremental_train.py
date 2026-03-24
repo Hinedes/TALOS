@@ -542,8 +542,6 @@ class ESKF:
         return True, mahal_sq, abs(y), float(np.linalg.norm(self.bg - bg_before))
 
 def compute_loss(pt, pcov, gt):
-    var = torch.exp(pcov)
-
     # 1. The Translation Head: Robust, High-Weight Loss
     pred_norm = pt.norm(dim=-1)
     gt_norm = gt.norm(dim=-1)
@@ -553,17 +551,18 @@ def compute_loss(pt, pcov, gt):
 
     # Magnitude Loss (Strong Anchor, Outlier-Robust)
     mask = gt_norm > 0.05
+    loss_mag = torch.zeros_like(gt_norm)
     if mask.any():
         speed_ratio = pred_norm[mask] / gt_norm[mask]
-        loss_mag_raw = F.huber_loss(speed_ratio, torch.ones_like(speed_ratio), delta=0.15, reduction='none')
-        loss_mag = torch.zeros_like(gt_norm)
-        loss_mag[mask] = loss_mag_raw
-    else:
-        loss_mag = torch.zeros_like(gt_norm)
+        loss_mag[mask] = F.huber_loss(speed_ratio, torch.ones_like(speed_ratio), delta=0.15, reduction='none')
 
-    # 2. The Covariance Head: NLL on Detached Predictions
+    # 2. The Covariance Head: Beta-NLL on Detached Predictions
+    var = torch.exp(pcov) + 1e-6
     mse_detached = (pt.detach() - gt) ** 2
-    loss_nll = 0.5 * (pcov + mse_detached / var)
+
+    # Beta attenuation breaks the variance collapse
+    beta = 0.2
+    loss_nll = 0.5 * (beta * pcov + mse_detached / var)
 
     # 3. Independent Weighting Strategy
     weight = 1.0 + 10.0 * gt_norm.unsqueeze(-1)
