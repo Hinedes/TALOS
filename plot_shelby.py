@@ -44,40 +44,49 @@ nymeria_paths = [
 ]
 
 val_path = None
+# --- EWS: Aggressive Discovery ---
+# If the raw VRS was vaporized, we might only have a .pkl or .npz cache.
 for nymeria_root in nymeria_paths:
     if nymeria_root.exists():
         candidates = list(nymeria_root.glob('Nymeria_v0.0_*shelby_arroyo*recording_head'))
         if candidates:
             val_path = sorted(candidates)[0] / 'recording_head'
-            print(f"[Data] Using: {val_path}")
+            print(f"[Data] Found raw: {val_path}")
             break
 
-if val_path is None:
-    raise FileNotFoundError(f"Could not find Shelby Arroyo validation sequence in: {nymeria_paths}")
-
+# If no raw directory, try searching the cache directly for the Shelby Arroyo sequence
 cache_dir = golden_dir / "cache"
 cache_dir.mkdir(parents=True, exist_ok=True)
 
-# Check for cached val_stream (prioritize /mnt/c/TALOS location)
-_cache_locations = [
-    Path('/mnt/c/TALOS/golden/cache') / f'{val_path.parent.name}_val_stream.pkl',
-    cache_dir / f'{val_path.parent.name}_val_stream.pkl'
-]
+df, gravity = None, None
 
-_cache = None
-for cache_path in _cache_locations:
-    if cache_path.exists():
-        _cache = cache_path
-        break
+if val_path:
+    _cache_locations = [
+        Path('/mnt/c/TALOS/golden/cache') / f'{val_path.parent.name}_val_stream.pkl',
+        cache_dir / f'{val_path.parent.name}_val_stream.pkl'
+    ]
+    for cache_path in _cache_locations:
+        if cache_path.exists():
+            print(f'[Cache] HIT val_stream from {cache_path}')
+            df, gravity = pickle.load(open(cache_path, 'rb'))
+            break
 
-if _cache is None:
-    _cache = cache_dir / f'{val_path.parent.name}_val_stream.pkl'
+if df is None:
+    # Look for any Shelby Arroyo .pkl in the cache
+    pkl_candidates = list(cache_dir.glob("*shelby_arroyo*val_stream.pkl"))
+    if not pkl_candidates:
+        # Also check common mount point
+        pkl_candidates = list(Path('/mnt/c/TALOS/golden/cache').glob("*shelby_arroyo*val_stream.pkl"))
+    
+    if pkl_candidates:
+        _cache = sorted(pkl_candidates)[0]
+        print(f'[Cache] HIT via glob: {_cache}')
+        df, gravity = pickle.load(open(_cache, 'rb'))
 
-if _cache.exists():
-    print(f'[Cache] HIT val_stream from {_cache}')
-    df, gravity = pickle.load(open(_cache, 'rb'))
-else:
-    print(f'[Cache] MISS -- reading VRS (slow)')
+if df is None:
+    if val_path is None:
+        raise FileNotFoundError(f"Could not find Shelby Arroyo validation sequence (raw OR cached .pkl) in: {nymeria_paths} or {cache_dir}")
+    print(f'[Cache] MISS -- reading VRS from {val_path} (slow)')
     df, gravity = load_continuous_val_stream(val_path)
 
 MAX_SECONDS = 300
