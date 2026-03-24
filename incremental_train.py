@@ -760,6 +760,43 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
     diag_laid_diff_mahal_sq = []
     diag_bg_dx_norm = []
 
+    # --- PRE-COMPUTE 1: Batched Neural Inference (GPU Bound) ---
+    print("  [GPU] Pre-computing neural inferences...")
+    inference_steps = [s for s in range(WINDOW_SIZE - 1, len(df)) if s % 10 == 0]
+    neural_preds = {}
+    if inference_steps:
+        windows = []
+        for s in inference_steps:
+            start_idx = s - WINDOW_SIZE + 1
+            end_idx = s + 1
+            w_accel = accel[start_idx:end_idx]
+            w_gyro = gyro[start_idx:end_idx]
+            win = np.concatenate([w_accel, w_gyro], axis=-1)
+            windows.append(win)
+
+        windows_np = np.array(windows, dtype=np.float32)
+        windows_tensor = torch.tensor(
+            (windows_np * 100.0).transpose(0, 2, 1),
+            dtype=torch.float32,
+            device=device,
+        )
+
+        pred_vels_list, pred_covs_list = [], []
+        with torch.no_grad():
+            for i in range(0, len(windows_tensor), BATCH_SIZE):
+                batch = windows_tensor[i:i + BATCH_SIZE]
+                pv, pc = model(batch)
+                pred_vels_list.append(pv.cpu().numpy())
+                pred_covs_list.append(pc.cpu().numpy())
+
+        all_pred_vels = np.concatenate(pred_vels_list, axis=0)
+        all_pred_covs = np.concatenate(pred_covs_list, axis=0)
+        neural_preds = {step: (all_pred_vels[i], all_pred_covs[i]) for i, step in enumerate(inference_steps)}
+
+    # --- PRE-COMPUTE 2: Ground Truth Rotations (Vectorized CPU) ---
+    print("  [CPU] Pre-computing Ground Truth rotations...")
+    R_gt_all = Rotation.from_quat(gt_quat).as_matrix()
+
     for step in range(len(df)):
         a, g = accel[step], gyro[step]
         a2_sample = accel2[step]
@@ -810,7 +847,7 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
         # HALO orientation cage disabled -- requires torso reference frame
 
         # Yaw drift telemetry: heading error of TALOS orientation vs GT orientation
-        R_gt_current = Rotation.from_quat(gt_quat[step]).as_matrix()
+        R_gt_current = R_gt_all[step]
         R_heading_err = R_gt_current.T @ eskf_talos.orientation
         yaw_err_deg = Rotation.from_matrix(R_heading_err).as_euler('ZYX', degrees=True)[0]
         yaw_err_deg = ((yaw_err_deg + 180.0) % 360.0) - 180.0
@@ -829,28 +866,17 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
 
         # 10Hz Neural Correction (TALOS only)
         if len(accel_buf) == WINDOW_SIZE and step % 10 == 0:
-            win_accel = np.array(accel_buf)
-            win_gyro  = np.array(gyro_buf)
-            
-            # KEEP the gravity/DC component for inference
-            win_accel_corrected = win_accel
-            
-            win = np.concatenate([win_accel_corrected, win_gyro], axis=-1)
-            # The "Turn Up the Volume" hack for evaluation inference
-            win_tensor = torch.tensor((win * 100.0).T[np.newaxis], dtype=torch.float32)  # (1, 6, 64)
-
-            with torch.no_grad():
-                pred_vel, pred_cov = model(win_tensor.to(device))
-
-            # The network outputs mean velocity (m/s), NOT displacement.
-            pred_vel_local_raw = pred_vel.cpu().numpy()[0]
+            # Retrieve pre-computed GPU results (network outputs mean velocity in m/s).
+            pred_vel_local_raw, pred_cov_np = neural_preds[step]
             pred_vel_local = pred_vel_local_raw * PRED_VEL_GAIN
             pred_vel_before_bulwark = pred_vel_local.copy()
             pred_vel_local = bulwark(pred_vel_local)
             bulwark_fire_count += int(not np.array_equal(pred_vel_local, pred_vel_before_bulwark))
-            pred_cov_np    = pred_cov.cpu().numpy()[0]
 
             # LAID veto
+            win_accel = np.array(accel_buf)
+            win_gyro  = np.array(gyro_buf)
+            win_accel_corrected = win_accel
             win2_accel = np.array(accel2_buf)
             win2_gyro  = np.array(gyro2_buf)
             win2       = np.concatenate([win2_accel, win2_gyro], axis=-1)
@@ -942,8 +968,7 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                 gt_mean_v_world    = (gt_pos_world_end - gt_pos_world_start) / (WINDOW_SIZE * dt)
                 
                 # Rotate GT to Local Frame using GT orientation (Isolates neural error from filter drift)
-                q_gt_current = df[['qx','qy','qz','qw']].iloc[step].values
-                R_gt_current = Rotation.from_quat(q_gt_current).as_matrix()
+                R_gt_current = R_gt_all[step]
                 gt_v_local   = R_gt_current.T @ gt_mean_v_world
                 
                 # --- Store Telemetry ---
