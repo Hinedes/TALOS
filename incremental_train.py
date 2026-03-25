@@ -45,6 +45,7 @@ from nymeria_loader import (load_sequence, load_sequence_cached, load_imu_stream
                             SID_RIGHT, SID_LEFT, TARGET_HZ)
 from telemetry import append_eval_csv, generate_diagnostic_dashboard
 from reporting import publish_training_summary
+from darwin import DarwinEngine
 
 # ESKF fusion thresholds (incremental_train is the source of truth).
 SLAP_THRESHOLD       = 4.00
@@ -719,8 +720,23 @@ def set_axes_equal(ax):
     ax.set_zlim3d([origin[2] - radius, origin[2] + radius])
 
 def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
-                  device, round_idx, plot_dir: Path, max_seconds=9999) -> float:
-    """Runs the trained model through the physical ESKF and returns mean ATE."""
+                  device, round_idx, plot_dir: Path, max_seconds=9999,
+                  fusion_params: dict | None = None) -> float:
+    """Runs the trained model through the physical ESKF and returns mean ATE.
+    
+    If fusion_params is provided, its values override the module-level constants
+    for this evaluation only. Used by DarwinEngine to test mutant parameter sets.
+    """
+    fp = fusion_params or {}
+    
+    # Unpack fusion params with fallback to module-level constants
+    fp_slap_threshold           = fp.get('SLAP_THRESHOLD', SLAP_THRESHOLD)
+    fp_r_obs_fixed_diag         = fp.get('R_OBS_FIXED_DIAG', R_OBS_FIXED_DIAG)
+    fp_pred_vel_gain            = fp.get('PRED_VEL_GAIN', PRED_VEL_GAIN)
+    fp_cage_radius              = fp.get('CAGE_RADIUS', CAGE_RADIUS)
+    fp_max_pred_world_speed_mps = fp.get('MAX_PRED_WORLD_SPEED_MPS', MAX_PRED_WORLD_SPEED_MPS)
+    fp_max_innovation_norm_mps  = fp.get('MAX_INNOVATION_NORM_MPS', MAX_INNOVATION_NORM_MPS)
+    fp_use_dynamic_r_obs        = fp.get('USE_DYNAMIC_R_OBS', USE_DYNAMIC_R_OBS)
     
     # CRITICAL: Clear stale state from previous rounds
     if hasattr(evaluate_eskf, '_cage_center'):
@@ -902,7 +918,7 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
         if len(accel_buf) == WINDOW_SIZE and step % 10 == 0:
             # Retrieve pre-computed GPU results (network outputs mean velocity in m/s).
             pred_vel_local_raw, pred_cov_np = neural_preds[step]
-            pred_vel_local = pred_vel_local_raw * PRED_VEL_GAIN
+            pred_vel_local = pred_vel_local_raw * fp_pred_vel_gain
             pred_vel_before_bulwark = pred_vel_local.copy()
             pred_vel_local = bulwark(pred_vel_local)
             bulwark_fire_count += int(not np.array_equal(pred_vel_local, pred_vel_before_bulwark))
@@ -962,18 +978,18 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
 
                 pred_var = np.exp(pred_cov_np)
                 r_obs_diag = np.clip(pred_var, R_OBS_MIN_DIAG, R_OBS_MAX_DIAG)
-                if USE_DYNAMIC_R_OBS:
+                if fp_use_dynamic_r_obs:
                     R_obs_used = np.diag(r_obs_diag.astype(np.float64))
                 else:
-                    R_obs_used = np.eye(3) * R_OBS_FIXED_DIAG
-                    r_obs_diag = np.array([R_OBS_FIXED_DIAG] * 3, dtype=np.float64)
+                    R_obs_used = np.eye(3) * fp_r_obs_fixed_diag
+                    r_obs_diag = np.array([fp_r_obs_fixed_diag] * 3, dtype=np.float64)
 
                 neural_updates += 1
 
                 accepted, mahal_sq = eskf_talos.update_local_velocity(
                     pred_vel_local,
                     R_obs=R_obs_used,
-                    slap_threshold=SLAP_THRESHOLD,
+                    slap_threshold=fp_slap_threshold,
                 )
 
                 # Telemetry only -- not fed to filter
@@ -985,7 +1001,7 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                 mahal_r_sq = float(residual_pre @ R_inv @ residual_pre)
 
                 # Hard safety gate before Kalman update to prevent catastrophic injections
-                if (pred_world_speed > MAX_PRED_WORLD_SPEED_MPS) or (innovation_norm > MAX_INNOVATION_NORM_MPS):
+                if (pred_world_speed > fp_max_pred_world_speed_mps) or (innovation_norm > fp_max_innovation_norm_mps):
                     safety_reject_count += 1
                 if accepted is False:
                     slap_count += 1
@@ -1033,7 +1049,7 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                     'mahal_r_sq': float(mahal_r_sq),
                     'innovation_norm': float(innovation_norm),
                     'pred_world_speed_mps': float(pred_world_speed),
-                    'safety_reject': bool((pred_world_speed > MAX_PRED_WORLD_SPEED_MPS) or (innovation_norm > MAX_INNOVATION_NORM_MPS)),
+                    'safety_reject': bool((pred_world_speed > fp_max_pred_world_speed_mps) or (innovation_norm > fp_max_innovation_norm_mps)),
                     'laid_diff_applied': bool(laid_diff_applied),
                     'laid_diff_mahal_sq': float(laid_diff_mahal_sq) if laid_diff_mahal_sq is not None else None,
                     'laid_diff_res_norm': float(laid_diff_res_norm) if laid_diff_res_norm is not None else None,
@@ -1146,8 +1162,8 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
         cage_clamped = False
         talos_pos_nocage = eskf_talos.position.copy()
 
-        if distance > CAGE_RADIUS:
-            eskf_talos.position = evaluate_eskf._cage_center + (head_vector / distance) * CAGE_RADIUS
+        if distance > fp_cage_radius:
+            eskf_talos.position = evaluate_eskf._cage_center + (head_vector / distance) * fp_cage_radius
             cage_clamp_count += 1
             cage_clamped = True
 
@@ -1239,7 +1255,7 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
     if neural_updates > 0:
         generate_diagnostic_dashboard(diag_v_pred_local, diag_v_gt_local, diag_mahal_sq,
                                       diag_v_gt_mag, diag_pred_std, diag_abs_error,
-                                      round_idx, plot_dir, slap_threshold=SLAP_THRESHOLD)
+                                      round_idx, plot_dir, slap_threshold=fp_slap_threshold)
 
     if neural_updates > 0:
         slap_rate = (slap_count / neural_updates) * 100
@@ -1311,14 +1327,14 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
         'pred_speed_mean': float(np.mean(diag_pred_speed)) if len(diag_pred_speed) > 0 else 0.0,
         'gt_speed_mean': float(np.mean(diag_gt_speed)) if len(diag_gt_speed) > 0 else 0.0,
         'pred_gt_speed_ratio': float(np.mean(diag_pred_speed) / (np.mean(diag_gt_speed) + 1e-6)) if len(diag_gt_speed) > 0 else 0.0,
-        'slap_threshold': float(SLAP_THRESHOLD),
+        'slap_threshold': float(fp_slap_threshold),
         'r_obs_min_diag': float(R_OBS_MIN_DIAG),
         'r_obs_max_diag': float(R_OBS_MAX_DIAG),
-        'use_dynamic_r_obs': bool(USE_DYNAMIC_R_OBS),
-        'r_obs_fixed_diag': float(R_OBS_FIXED_DIAG),
-        'pred_vel_gain': float(PRED_VEL_GAIN),
-        'max_pred_world_speed_mps': float(MAX_PRED_WORLD_SPEED_MPS),
-        'max_innovation_norm_mps': float(MAX_INNOVATION_NORM_MPS),
+        'use_dynamic_r_obs': bool(fp_use_dynamic_r_obs),
+        'r_obs_fixed_diag': float(fp_r_obs_fixed_diag),
+        'pred_vel_gain': float(fp_pred_vel_gain),
+        'max_pred_world_speed_mps': float(fp_max_pred_world_speed_mps),
+        'max_innovation_norm_mps': float(fp_max_innovation_norm_mps),
         'yaw_anchor_min_trust': float(YAW_ANCHOR_MIN_TRUST),
         'yaw_anchor_max_omega_mag': float(YAW_ANCHOR_MAX_OMEGA_MAG),
         'yaw_anchor_max_laid_rms': float(YAW_ANCHOR_MAX_LAID_RMS),
@@ -1490,6 +1506,11 @@ def main():
     best_loss_ever       = float('inf')
     loss_stagnant_rounds = 0
 
+    # Darwin EA: stagnation recovery
+    darwin = DarwinEngine(population_size=7, seed=args.seed)
+    summary_history = []
+    fusion_params = None  # None = use module-level defaults
+
     print("\n:: Commencing Incremental Training Loop ::")
     for round_idx, (sid, entry) in enumerate(train_seqs, start=1):
         free = shutil.disk_usage(root).free / 1e9
@@ -1593,8 +1614,14 @@ def main():
         print("  [ESKF]  Integrating validation sequence...")
         # Skip stationary period (first 313s), evaluate on real walking only
         val_df_walk = val_df.iloc[313*100:].reset_index(drop=True)
-        mean_ate = evaluate_eskf(model, val_df_walk, val_gravity, device, round_idx, run_dir, max_seconds=300)
+        mean_ate = evaluate_eskf(model, val_df_walk, val_gravity, device, round_idx, run_dir,
+                                 max_seconds=300, fusion_params=fusion_params)
         print(f"  [Result] Neural Loss: {train_final:.4f} | ESKF ATE: {mean_ate:.3f}m")
+
+        # Accumulate telemetry for Darwin diagnostician
+        eval_summary = getattr(evaluate_eskf, '_last_summary', {})
+        if eval_summary:
+            summary_history.append(eval_summary)
 
         # Catastrophic divergence breaker -- abort early instead of burning rounds
         cat_limit = max(CAT_ATE_ABS_M, best_ate_ever * CAT_ATE_BEST_MULT if np.isfinite(best_ate_ever) else CAT_ATE_ABS_M)
@@ -1683,22 +1710,22 @@ def main():
 
         if bad_rounds >= PATIENCE:
             print(f"\n!! PHYSICAL OVERFITTING DETECTED. ESKF drift worsened for {PATIENCE} rounds.")
-            print("   [Overnight Hack] Patience broken. Restoring best physical weights, nuking pool, and pushing forward.")
-            
+            print("   [Darwin] EA triggered — evolving fusion parameters...")
+
+            # Build evaluate_fn closure for Darwin: frozen model, frozen val data
+            def _darwin_evaluate(params):
+                return evaluate_eskf(model, val_df_walk, val_gravity, device,
+                                     round_idx, run_dir, max_seconds=300,
+                                     fusion_params=params)
+
+            fusion_params = darwin.evolve(
+                evaluate_fn=_darwin_evaluate,
+                parent_params=fusion_params,
+                summary_history=summary_history,
+                run_dir=run_dir,
+            )
             bad_rounds = 0
-            subject_pool.clear()
-            train_data = None
-            
-            best_ckpt = run_dir / 'talos_best_physical.pth'
-            if best_ckpt.exists():
-                model.load_state_dict(torch.load(best_ckpt, map_location=device, weights_only=False))
-                opt.state.clear()
-                torch.save(model.state_dict(), golden / 'talos.pth')
-            
-            # Escape velocity: gently decay LR to settle into new minima space
-            for param_group in opt.param_groups:
-                param_group['lr'] = max(param_group['lr'] * 0.5, 1e-5)
-                
+            # Keep the pool — EA fixes the fusion, not the data
             continue
 
     print(f"\n:: Training Complete ::")
