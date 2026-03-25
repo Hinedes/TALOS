@@ -572,6 +572,72 @@ def compute_loss(pt, pcov, gt):
 
 
 # Data Pipeline
+class MegaBuffer:
+    """Pre-allocated zero-copy reservoir buffer for massive datasets."""
+    def __init__(self, capacity=10_000_000):
+        print(f":: Allocating MegaBuffer ({capacity:,} windows) ...")
+        self.capacity = capacity
+        self.cursor = 0
+        self.size = 0
+        
+        # CPU Memory allocation (No GPU VRAM consumed)
+        self.X = torch.zeros((capacity, 6, 64), dtype=torch.float32)
+        self.T = torch.zeros((capacity, 3), dtype=torch.float32)
+        self.Q = torch.zeros((capacity, 4), dtype=torch.float32)
+        
+        # Track history for quarantine rollbacks
+        self._history = []
+
+    def add(self, data: dict):
+        new_X = torch.from_numpy(to_raw(data['imu1_features']) * 100.0)
+        new_T = torch.from_numpy(data['trans'])
+        new_Q = torch.from_numpy(data['quat'])
+        N = new_X.shape[0]
+        
+        if N > self.capacity: # Truncate if ridiculously large
+            new_X = new_X[-self.capacity:]
+            new_T = new_T[-self.capacity:]
+            new_Q = new_Q[-self.capacity:]
+            N = self.capacity
+            
+        # Save snapshot for popping
+        self._history.append((self.cursor, self.size, N))
+            
+        remaining = self.capacity - self.cursor
+        if N <= remaining:
+            self.X[self.cursor:self.cursor+N] = new_X
+            self.T[self.cursor:self.cursor+N] = new_T
+            self.Q[self.cursor:self.cursor+N] = new_Q
+            self.cursor = (self.cursor + N) % self.capacity
+            self.size = min(self.capacity, self.size + N)
+        else:
+            # Wrap around
+            self.X[self.cursor:] = new_X[:remaining]
+            self.T[self.cursor:] = new_T[:remaining]
+            self.Q[self.cursor:] = new_Q[:remaining]
+            overflow = N - remaining
+            self.X[:overflow] = new_X[remaining:]
+            self.T[:overflow] = new_T[remaining:]
+            self.Q[:overflow] = new_Q[remaining:]
+            self.cursor = overflow
+            self.size = self.capacity
+
+    def pop(self):
+        """Roll back the last added sequence (for quarantine)."""
+        if not self._history: return False
+        old_cursor, old_size, n_added = self._history.pop()
+        self.cursor = old_cursor
+        self.size = old_size
+        return True
+
+    def clear(self):
+        self.cursor = 0
+        self.size = 0
+        self._history.clear()
+
+    def get_dataset(self):
+        return TensorDataset(self.X[:self.size], self.T[:self.size], self.Q[:self.size])
+
 def accumulate(existing: dict | None, new: dict) -> dict:
     if existing is None: return {k: v.copy() for k, v in new.items()}
     return {k: np.concatenate([existing[k], new[k]], axis=0) for k in new}
@@ -582,9 +648,9 @@ def to_raw(imu_windows: np.ndarray) -> np.ndarray:
 
 def make_tensors(data: dict, device: torch.device):
     # The "Turn Up the Volume" hack: multiply IMU data by 100
-    X = torch.from_numpy(to_raw(data['imu1_features']) * 100.0).to(device)
-    T = torch.from_numpy(data['trans']).to(device)
-    Q = torch.from_numpy(data['quat']).to(device)
+    X = torch.from_numpy(to_raw(data['imu1_features']) * 100.0)
+    T = torch.from_numpy(data['trans'])
+    Q = torch.from_numpy(data['quat'])
     return X, T, Q
 
 def load_continuous_val_stream(seq_root: Path):
@@ -666,18 +732,16 @@ def download_sequence(seq_id: str, entry: dict, root: Path) -> Path | None:
     return seq_path
 
 # Training
-def train_round(model, opt, sched, train_data, val_data, device, epochs, checkpoint_path, loader_workers=0):
-    X_tr, T_tr, Q_tr = make_tensors(train_data, device)
+def train_round(model, opt, sched, train_dataset, val_data, device, epochs, checkpoint_path, loader_workers=0):
     X_va, T_va, Q_va = make_tensors(val_data,   device)
-    dataset_on_cpu = (X_tr.device.type == 'cpu')
-    effective_workers = loader_workers if dataset_on_cpu else 0
+    effective_workers = loader_workers
     loader = DataLoader(
-        TensorDataset(X_tr, T_tr, Q_tr),
+        train_dataset,
         batch_size=BATCH_SIZE,
         shuffle=True,
         drop_last=True,
         num_workers=effective_workers,
-        pin_memory=(device.type == 'cuda' and dataset_on_cpu),
+        pin_memory=(device.type == 'cuda'),
         persistent_workers=(effective_workers > 0),
     )
 
@@ -687,6 +751,7 @@ def train_round(model, opt, sched, train_data, val_data, device, epochs, checkpo
         model.train()
         ep_loss = 0.0
         for xb, tb, qb in loader:
+            xb, tb, qb = xb.to(device, non_blocking=True), tb.to(device, non_blocking=True), qb.to(device, non_blocking=True)
             opt.zero_grad()
             pt, pcov = model(xb)
             loss = compute_loss(pt, pcov, tb)
@@ -698,8 +763,8 @@ def train_round(model, opt, sched, train_data, val_data, device, epochs, checkpo
 
         model.eval()
         with torch.no_grad():
-            pvt, pvcov = model(X_va)
-            v_loss = compute_loss(pvt, pvcov, T_va)
+            pvt, pvcov = model(X_va.to(device))
+            v_loss = compute_loss(pvt, pvcov, T_va.to(device))
 
         sched.step(v_loss.item())
 
@@ -721,11 +786,13 @@ def set_axes_equal(ax):
 
 def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                   device, round_idx, plot_dir: Path, max_seconds=9999,
-                  fusion_params: dict | None = None) -> float:
+                  fusion_params: dict | None = None,
+                  export_predictions: bool = False) -> float:
     """Runs the trained model through the physical ESKF and returns mean ATE.
     
     If fusion_params is provided, its values override the module-level constants
     for this evaluation only. Used by DarwinEngine to test mutant parameter sets.
+    If export_predictions is True, saves the static neural inferences to disk.
     """
     fp = fusion_params or {}
     
@@ -848,6 +915,13 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
         all_pred_vels = np.concatenate(pred_vels_list, axis=0)
         all_pred_covs = np.concatenate(pred_covs_list, axis=0)
         neural_preds = {step: (all_pred_vels[i], all_pred_covs[i]) for i, step in enumerate(inference_steps)}
+        
+        if export_predictions:
+            np.savez(plot_dir / f"val_predictions_R{round_idx}.npz",
+                     steps=np.array(inference_steps),
+                     pred_vels=all_pred_vels,
+                     pred_covs=all_pred_covs)
+            print(f"  [Export] Saved raw neural inferences to val_predictions_R{round_idx}.npz")
 
     # --- PRE-COMPUTE 2: Ground Truth Rotations (Vectorized CPU) ---
     print("  [CPU] Pre-computing Ground Truth rotations...")
@@ -1492,8 +1566,10 @@ def main():
     model.npu_core = torch.compile(model.npu_core) # Compile ONLY the MLP, leave FFT eager
     opt        = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-2)
     sched      = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", factor=0.5, patience=3, min_lr=1e-5)
-    train_data = None
-    subject_pool = []
+    
+    # Pre-allocated 10M windows (~15GB RAM). Replaces OOM-prone subject_pool concat.
+    mega_buffer = MegaBuffer(capacity=10_000_000)
+    train_dataset = None
     history    = []
 
     bad_rounds    = 0
@@ -1537,12 +1613,9 @@ def main():
                     z.unlink(missing_ok=True)
                 print(f"  [EWS Cleanup] Vaporized raw VRS & zip files for {sid[:15]} to reclaim space!")
             
-            # --- Unlimited Accumulation ---
-            subject_pool.append(new_data)
-                
-            train_data = None
-            for p_data in subject_pool:
-                train_data = accumulate(train_data, p_data)
+            # --- Unlimited Accumulation (MegaBuffer) ---
+            mega_buffer.add(new_data)
+            train_dataset = mega_buffer.get_dataset()
             
             # --- SURGICAL FIX: Reset stagnation trackers ---
             # The dataset has changed, so the loss baseline must be reset.
@@ -1554,8 +1627,8 @@ def main():
             continue
 
         try:
-            print(f"  [Train] Pool size: {train_data['trans'].shape[0]:,} windows")
-            train_final, _ = train_round(model, opt, sched, train_data, val_data, device,
+            print(f"  [Train] Pool size: {mega_buffer.size:,} windows")
+            train_final, _ = train_round(model, opt, sched, train_dataset, val_data, device,
                              EPOCHS_PER_ROUND, golden / 'talos.pth',
                              loader_workers=max(0, args.loader_workers))
             
@@ -1563,8 +1636,8 @@ def main():
                 print("\n!! NaN DETECTED IN LOSS! Mathematical failure.")
                 print("   [Overnight Hack] Emptying pool, halving LR, reverting weights, and continuing!")
                 torch.cuda.empty_cache()
-                subject_pool.clear()
-                train_data = None
+                mega_buffer.clear()
+                train_dataset = None
                 
                 best_ckpt = run_dir / 'talos_best_physical.pth'
                 if best_ckpt.exists():
@@ -1586,8 +1659,8 @@ def main():
                 print(f"\n!! NEURAL STAGNATION DETECTED. Loss flat for {LOSS_PATIENCE} rounds.")
                 print("   [Overnight Hack] Ignored! Nuking pool and pushing forward.")
                 loss_stagnant_rounds = 0
-                subject_pool.clear()
-                train_data = None
+                mega_buffer.clear()
+                train_dataset = None
                 for param_group in opt.param_groups:
                     param_group['lr'] = max(param_group['lr'] * 0.5, 1e-5)
                 continue
@@ -1597,8 +1670,8 @@ def main():
                 print(f"\n!! CUDA OUT OF MEMORY: {e}")
                 print(f"   [Overnight Hack] Purging memory, shrinking batch size from {BATCH_SIZE} to {max(512, BATCH_SIZE // 2)}, and continuing!")
                 torch.cuda.empty_cache()
-                subject_pool.clear()
-                train_data = None
+                mega_buffer.clear()
+                train_dataset = None
                 
                 # Dynamically reduce footprint to chew through heavy manifolds
                 BATCH_SIZE = max(512, BATCH_SIZE // 2)
@@ -1631,15 +1704,13 @@ def main():
             print(f"   [Quarantine] Strike {cat_strikes}/{CAT_STRIKE_LIMIT} on sequence {sid[:40]}...")
 
             # Quarantine the just-added sequence from the subject pool
-            if subject_pool:
-                subject_pool.pop()
+            if mega_buffer.size > 0:
+                mega_buffer.pop()
                 blacklisted_sids.add(sid)
                 print(f"   [Blacklist] {sid[:40]} permanently blacklisted")
-                train_data = None
-                for p_data in subject_pool:
-                    train_data = accumulate(train_data, p_data)
-                if train_data is not None:
-                    print(f"   [Quarantine] Pool reverted to {train_data['trans'].shape[0]:,} windows")
+                train_dataset = mega_buffer.get_dataset() if mega_buffer.size > 0 else None
+                if train_dataset is not None:
+                    print(f"   [Quarantine] Pool reverted to {mega_buffer.size:,} windows")
 
             # Roll back model weights to last known best physical checkpoint
             best_ckpt = run_dir / 'talos_best_physical.pth'
@@ -1657,8 +1728,8 @@ def main():
             if cat_strikes >= CAT_STRIKE_LIMIT:
                 print(f"\n!! CATASTROPHIC DIVERGENCE LIMIT REACHED ({CAT_STRIKE_LIMIT}).")
                 print("   [Overnight Hack] Who cares? Nuking the accumulated pool and pushing to the next sequence!")
-                subject_pool.clear()
-                train_data = None
+                mega_buffer.clear()
+                train_dataset = None
                 cat_strikes = 0
                 continue
 
@@ -1674,15 +1745,13 @@ def main():
             print(f"\n!! SOFT QUARANTINE: ATE {mean_ate:.3f}m (> {soft_limit:.3f}m) with cage clamp {cage_pct:.1f}%.")
             print(f"   [Quarantine] Soft strike {soft_quarantines} on sequence {sid[:40]}...")
 
-            if subject_pool:
-                subject_pool.pop()
+            if mega_buffer.size > 0:
+                mega_buffer.pop()
                 blacklisted_sids.add(sid)
                 print(f"   [Blacklist] {sid[:40]} permanently blacklisted")
-                train_data = None
-                for p_data in subject_pool:
-                    train_data = accumulate(train_data, p_data)
-                if train_data is not None:
-                    print(f"   [Quarantine] Pool reverted to {train_data['trans'].shape[0]:,} windows")
+                train_dataset = mega_buffer.get_dataset() if mega_buffer.size > 0 else None
+                if train_dataset is not None:
+                    print(f"   [Quarantine] Pool reverted to {mega_buffer.size:,} windows")
 
             best_ckpt = run_dir / 'talos_best_physical.pth'
             if best_ckpt.exists():
@@ -1704,6 +1773,10 @@ def main():
             bad_rounds    = 0
             shutil.copy(golden / 'talos.pth', run_dir / 'talos_best_physical.pth')
             print(f"  [Best]  New best ATE: {mean_ate:.3f}m : checkpoint saved.")
+            
+            # Phase 2 Export: Save static target for CPU Optuna Daemon
+            evaluate_eskf(model, val_df_walk, val_gravity, device, round_idx, run_dir, max_seconds=300, export_predictions=True)
+            
         else:
             bad_rounds += 1
             print(f"  !! ATE degrading : Strike {bad_rounds}/{PATIENCE}")
