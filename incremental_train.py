@@ -1692,7 +1692,6 @@ def main():
         # Automatically hot-reload the latest brute-forced physical parameters
         daemon_config = run_dir / 'darwin_config.json'
         if daemon_config.exists():
-            import json
             try:
                 with open(daemon_config, 'r') as f:
                     new_params = json.load(f)
