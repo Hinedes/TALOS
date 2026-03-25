@@ -192,41 +192,42 @@ def optimize_run(run_dir_str, n_trials=500):
         last_processed_npz = npz_path
 
         def objective(trial):
-        params = {
-            'SLAP_THRESHOLD': trial.suggest_float("SLAP_THRESHOLD", 1.5, 8.0),
-            'R_OBS_FIXED_DIAG': trial.suggest_float("R_OBS_FIXED_DIAG", 0.01, 1.0, log=True),
-            'PRED_VEL_GAIN': trial.suggest_float("PRED_VEL_GAIN", 0.5, 1.5),
-        }
-        return evaluate_trajectory(params, run_dir, val_df_walk, val_gravity, npz_path)
+            params = {
+                'SLAP_THRESHOLD': trial.suggest_float("SLAP_THRESHOLD", 1.5, 8.0),
+                'R_OBS_FIXED_DIAG': trial.suggest_float("R_OBS_FIXED_DIAG", 0.01, 1.0, log=True),
+                'PRED_VEL_GAIN': trial.suggest_float("PRED_VEL_GAIN", 0.5, 1.5),
+            }
+            return evaluate_trajectory(params, run_dir, val_df_walk, val_gravity, npz_path)
 
-    # Use SQLite for multi-process safe synchronization
-    db_path = run_dir / "optuna_eskf.db"
-    study_name = "talos_fusion"
-    
-    # To run this purely as a daemon script, we can just run a study here
-    study = optuna.create_study(
-        study_name=study_name,
-        storage=f"sqlite:///{db_path}",
-        load_if_exists=True,
-        direction="minimize"
-    )
-    
-    # Mute optuna for massive parallelism
-    optuna.logging.set_verbosity(optuna.logging.WARNING)
-    
-    print(f"Brute forcing {n_trials} trajectories...")
-    study.optimize(objective, n_trials=n_trials, n_jobs=18) # Smash the Ultra 7 265K
-    
-    best_params = study.best_params
-    best_ate = study.best_value
-    
-    print(f"\n[Optuna Done] Best ATE found: {best_ate:.3f}m")
-    print(f"Best Params: {best_params}")
-    
-    config_path = run_dir / 'darwin_config.json'
-    config_path.write_text(json.dumps(best_params, indent=2))
-    print(f"Saved to {config_path.name}. GPU incremental_train.py will use this automatically on next round.")
+        # Use SQLite for multi-process safe synchronization
+        db_path = run_dir / "optuna_eskf.db"
+        study_name = "talos_fusion"
+        
+        # To run this purely as a daemon script, we can just run a study here
+        study = optuna.create_study(
+            study_name=study_name,
+            storage=f"sqlite:///{db_path}",
+            load_if_exists=True,
+            direction="minimize"
+        )
+        
+        # Mute optuna for massive parallelism
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        
+        print(f"Brute forcing {n_trials} trajectories...")
+        study.optimize(objective, n_trials=n_trials, n_jobs=18) # Smash the Ultra 7 265K
+        
+        best_params = study.best_params
+        best_ate = study.best_value
+        
+        print(f"\n[Optuna Done] Best ATE found: {best_ate:.3f}m")
+        print(f"Best Params: {best_params}")
+        
+        config_path = run_dir / 'darwin_config.json'
+        config_path.write_text(json.dumps(best_params, indent=2))
+        print(f"Saved to {config_path.name}. GPU incremental_train.py will use this automatically on next round.")
         print(f"[Daemon] Optimization cycle complete. Resuming watch...")
+        
 if __name__ == "__main__":
     # Point this at the latest run directory
     runs = sorted(glob.glob("/home/iclab/TALOS/golden/run_*"))
