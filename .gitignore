@@ -26,7 +26,12 @@ golden_val.npy
 *.png
 *.env
 *.txt
+*.zip
+*.nbc
+*.nbi
+*.tsv
 golden/
 pictures/
 talos_skill/
 .vscode/
+copilot-instructions.md

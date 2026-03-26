@@ -139,6 +139,7 @@ def evaluate_trajectory(params, run_dir, val_df, val_gravity, npz_path):
     eskf.orientation = init_rot.copy()
 
     fp_pred_vel_gain = params.get('PRED_VEL_GAIN', 1.0)
+    fp_use_dynamic_r_obs = params.get('USE_DYNAMIC_R_OBS', False)
     fp_r_obs_fixed_diag = params.get('R_OBS_FIXED_DIAG', 0.10)
     fp_slap_threshold = params.get('SLAP_THRESHOLD', 4.0)
 
@@ -152,8 +153,14 @@ def evaluate_trajectory(params, run_dir, val_df, val_gravity, npz_path):
             pred_vel_raw, pred_cov_raw = neural_preds[step]
             pred_vel_local = pred_vel_raw * fp_pred_vel_gain
             
-            # Simplified static R
-            R_obs_used = np.eye(3) * fp_r_obs_fixed_diag
+            # The Physics Parity Fix: Dynamic vs Fixed R_obs
+            if fp_use_dynamic_r_obs:
+                pred_var = np.exp(pred_cov_raw)
+                r_obs_diag = np.clip(pred_var, 0.05, 2.00)  # Hardcoded limits from incremental_train.py
+                R_obs_used = np.diag(r_obs_diag.astype(np.float64))
+            else:
+                R_obs_used = np.eye(3) * fp_r_obs_fixed_diag
+            
             eskf.update_local_velocity(pred_vel_local, R_obs_used, slap_threshold=fp_slap_threshold)
 
         talos_positions.append(eskf.position.copy())
@@ -192,11 +199,19 @@ def optimize_run(run_dir_str, n_trials=500):
         last_processed_npz = npz_path
 
         def objective(trial):
+            # Let Optuna battle-test the dynamic covariance against a fixed baseline
+            use_dynamic = trial.suggest_categorical("USE_DYNAMIC_R_OBS", [True, False])
+            
             params = {
                 'SLAP_THRESHOLD': trial.suggest_float("SLAP_THRESHOLD", 1.5, 8.0),
-                'R_OBS_FIXED_DIAG': trial.suggest_float("R_OBS_FIXED_DIAG", 0.01, 1.0, log=True),
                 'PRED_VEL_GAIN': trial.suggest_float("PRED_VEL_GAIN", 0.5, 1.5),
+                'USE_DYNAMIC_R_OBS': use_dynamic,
             }
+            
+            # Only tune the fixed diagonal if we are actually using it
+            if not use_dynamic:
+                params['R_OBS_FIXED_DIAG'] = trial.suggest_float("R_OBS_FIXED_DIAG", 0.01, 1.0, log=True)
+            
             return evaluate_trajectory(params, run_dir, val_df_walk, val_gravity, npz_path)
 
         # Use SQLite for multi-process safe synchronization
