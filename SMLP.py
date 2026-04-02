@@ -15,11 +15,14 @@ import torch.nn.functional as F
 
 
 class SpectralMLPNPU(nn.Module):
-    def __init__(self):
+    def __init__(self, seq_len=256):
         super().__init__()
+        n_fft_bins = (seq_len // 2) + 1
+        in_features = 6 * 2 * n_fft_bins  # 256 seq_len = 1548 features
+
         # --- TRANSLATION PATHWAY (Dedicated to pure kinematics) ---
-        # 396 inputs -> 256 -> 128 -> 64 -> 3
-        self.fc1_t = nn.Linear(396, 256)
+        # in_features -> 256 -> 128 -> 64 -> 3
+        self.fc1_t = nn.Linear(in_features, 256)
         self.bn1_t = nn.BatchNorm1d(256)
         self.fc2_t = nn.Linear(256, 128)
         self.bn2_t = nn.BatchNorm1d(128)
@@ -28,8 +31,8 @@ class SpectralMLPNPU(nn.Module):
         self.head_trans = nn.Linear(64, 3)
 
         # --- COVARIANCE PATHWAY (Dedicated to NLL uncertainty) ---
-        # 396 inputs -> 256 -> 128 -> 64 -> 3
-        self.fc1_c = nn.Linear(396, 256)
+        # in_features -> 256 -> 128 -> 64 -> 3
+        self.fc1_c = nn.Linear(in_features, 256)
         self.bn1_c = nn.BatchNorm1d(256)
         self.fc2_c = nn.Linear(256, 128)
         self.bn2_c = nn.BatchNorm1d(128)
@@ -63,9 +66,9 @@ class SpectralMLPNPU(nn.Module):
 
 
 class SpectralMLP(nn.Module):
-    def __init__(self):
+    def __init__(self, seq_len=256):
         super().__init__()
-        self.npu_core = SpectralMLPNPU()
+        self.npu_core = SpectralMLPNPU(seq_len=seq_len)
 
     def forward(self, x_raw):
         B = x_raw.size(0)
@@ -88,7 +91,7 @@ BigSpectralMLP = SpectralMLP
 if __name__ == '__main__':
     model = SpectralMLP()
     print(f"Total Parameters: {sum(p.numel() for p in model.parameters()):,}")
-    dummy = torch.randn(4, 6, 64)
+    dummy = torch.randn(4, 6, 256)
     t, lv = model(dummy)
     print(f"Translation : {t.shape}")
     print(f"LogVar      : {lv.shape}")

@@ -24,7 +24,7 @@ SID_RIGHT = StreamId("1202-1")   # imu-right (primary)
 SID_LEFT  = StreamId("1202-2")   # imu-left  (noise reference)
 
 # Config
-WINDOW_SIZE = 64      # samples
+WINDOW_SIZE = 256     # samples
 STRIDE      = 10      # samples
 TARGET_HZ   = 100.0   # resample both IMUs to this rate before windowing
 

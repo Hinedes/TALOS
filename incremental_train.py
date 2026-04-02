@@ -67,10 +67,10 @@ BATCH_SIZE             = 4096
 VAL_SUBJECT            = 'shelby_arroyo'  # 63m locomotion stress test
 
 # FFT & Nymeria Config
-WINDOW_SIZE = 64
-N_BINS      = 33
+WINDOW_SIZE = 256
+N_BINS      = (WINDOW_SIZE // 2) + 1
 N_CHANNELS  = 6
-INPUT_DIM   = N_BINS * N_CHANNELS  # 198
+INPUT_DIM   = 2 * N_CHANNELS * N_BINS  # 256 seq_len = 1548 spectral features
 ESKF_DT     = 1.0 / TARGET_HZ
 
 # ZARU Config
@@ -565,8 +565,9 @@ def compute_loss(pt, pcov, gt):
     stationary_mask = (gt_speed > 0.05).float()
     loss_dir = (1.0 - F.cosine_similarity(pt, gt, dim=-1, eps=1e-6)).unsqueeze(-1)
 
-    # 3. Speed-weighted combination
-    weight = 1.0 + 10.0 * gt_speed
+    # 3. Speed-weighted combination (Inverted for Drift Suppression)
+    # Applies a ~10x penalty when stationary, tapering down to 1x at high speeds
+    weight = 1.0 + 9.0 * torch.exp(-10.0 * gt_speed)
     loss = torch.mean(weight * loss_nll) + 0.5 * torch.mean(loss_dir * stationary_mask)
 
     return loss
@@ -582,7 +583,7 @@ class MegaBuffer:
         self.size = 0
         
         # CPU Memory allocation (No GPU VRAM consumed)
-        self.X = torch.zeros((capacity, 6, 64), dtype=torch.float32)
+        self.X = torch.zeros((capacity, 6, 256), dtype=torch.float32)
         self.T = torch.zeros((capacity, 3), dtype=torch.float32)
         self.Q = torch.zeros((capacity, 4), dtype=torch.float32)
         
