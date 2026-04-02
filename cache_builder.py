@@ -12,13 +12,39 @@ from nymeria_loader import (
     interpolate_gt, SID_RIGHT, SID_LEFT, TARGET_HZ
 )
 
-ROOT      = Path('/mnt/c/TALOS/nymeria')
+RAW_ROOT_CANDIDATES = [
+    Path('/home/iclab/TALOS/nymeria'),
+    Path('/mnt/c/TALOS/nymeria'),
+]
 CACHE_DIR = Path('/home/iclab/TALOS/golden/cache')
-MANIFEST  = Path('/mnt/c/TALOS/Nymeria_download_urls.json')
+MANIFEST_CANDIDATES = [
+    Path('/home/iclab/TALOS/Nymeria_download_urls.json'),
+    Path('/mnt/c/TALOS/Nymeria_download_urls.json'),
+]
+
+
+def first_existing(paths):
+    for path in paths:
+        if path.exists():
+            return path
+    return paths[0]
+
+
+ROOT = first_existing(RAW_ROOT_CANDIDATES)
+MANIFEST = first_existing(MANIFEST_CANDIDATES)
 
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
+if not ROOT.exists():
+    raise FileNotFoundError(f"Raw Nymeria root not found. Checked: {RAW_ROOT_CANDIDATES}")
+
+if not MANIFEST.exists():
+    raise FileNotFoundError(f"Nymeria manifest not found. Checked: {MANIFEST_CANDIDATES}")
+
 manifest = json.loads(MANIFEST.read_text())
+
+print(f"[CACHE ROOT] {ROOT}")
+print(f"[MANIFEST]    {MANIFEST}")
 
 for seq_id, entry in manifest["sequences"].items():
     out_path = CACHE_DIR / f"Nymeria_v0.0_{seq_id}_recording_head.npz"
